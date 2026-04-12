@@ -17,8 +17,8 @@ app.get("/ws", (c) => {
 });
 
 // Serve static files in production
-app.use("/*", serveStatic({ root: "./client/dist" }));
-app.use("/*", serveStatic({ path: "./client/dist/index.html" }));
+app.use("/*", serveStatic({ root: "./dist" }));
+app.use("/*", serveStatic({ path: "./dist/index.html" }));
 
 const port = Number(Deno.env.get("PORT") ?? 8000);
 console.log(`Server running on http://localhost:${port}`);
