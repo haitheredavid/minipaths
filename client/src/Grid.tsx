@@ -12,7 +12,7 @@ interface Path {
   color: string;
 }
 
-const PATH_COLORS = ["#6c5ce7", "#00b894", "#e17055", "#0984e3", "#fdcb6e", "#e84393"];
+const PATH_COLORS = ["#7c6cf0", "#00d2a0", "#ff7b5c", "#3da5f4", "#ffd166", "#ff6b9d"];
 
 function snapToGrid(x: number, z: number): [number, number] {
   return [
@@ -25,7 +25,7 @@ function findPath(
   start: [number, number],
   end: [number, number],
   occupied: Set<string>
-): [number, number][] {
+): [number, number][] | null {
   // A* on grid
   const key = (p: [number, number]) => `${p[0]},${p[1]}`;
   const dirs: [number, number][] = [
@@ -86,8 +86,8 @@ function findPath(
     }
   }
 
-  // No path found — straight line fallback
-  return [start, end];
+  // No path found
+  return null;
 }
 
 function heuristic(a: [number, number], b: [number, number]): number {
@@ -113,7 +113,7 @@ function GridLines() {
           args={[new Float32Array(points.flatMap((p) => [p.x, p.y, p.z])), 3]}
         />
       </bufferGeometry>
-      <lineBasicMaterial color="#ddd" />
+      <lineBasicMaterial color="#2a3a4a" />
     </lineSegments>
   );
 }
@@ -247,12 +247,12 @@ function AgentMesh({ agent, path }: { agent: Agent; path: [number, number][] }) 
   );
 }
 
-function HoverCell({ position }: { position: [number, number] | null }) {
+function HoverCell({ position, blocked = false }: { position: [number, number] | null; blocked?: boolean }) {
   if (!position) return null;
   return (
     <mesh position={[position[0], 0.02, position[1]]} rotation={[-Math.PI / 2, 0, 0]}>
       <planeGeometry args={[CELL_SIZE * 0.9, CELL_SIZE * 0.9]} />
-      <meshBasicMaterial color="#b8e6ff" transparent opacity={0.5} side={THREE.DoubleSide} />
+      <meshBasicMaterial color={blocked ? "#ff4444" : "#4a9eff"} transparent opacity={blocked ? 0.5 : 0.35} side={THREE.DoubleSide} />
     </mesh>
   );
 }
@@ -304,13 +304,17 @@ export function GameGrid({ onStateChange }: GameGridProps) {
     onStateChange(paths.length, !!pendingStart, handleClear, handleUndo);
   }, [paths.length, pendingStart, onStateChange, handleClear, handleUndo]);
 
-  const previewPath = useMemo(() => {
+  const previewResult = useMemo(() => {
     if (!pendingStart || !hover) return null;
     if (pendingStart[0] === hover[0] && pendingStart[1] === hover[1]) return null;
-    return findPath(pendingStart, hover, occupied);
+    if (occupied.has(`${hover[0]},${hover[1]}`)) return { path: null, blocked: true };
+    const path = findPath(pendingStart, hover, occupied);
+    return { path, blocked: path === null };
   }, [pendingStart, hover, occupied]);
 
-  const previewColor = PATH_COLORS[paths.length % PATH_COLORS.length];
+  const previewColor = previewResult?.blocked
+    ? "#ff0000"
+    : PATH_COLORS[paths.length % PATH_COLORS.length];
 
   const handlePointerMove = useCallback((e: ThreeEvent<PointerEvent>) => {
     e.stopPropagation();
@@ -323,7 +327,10 @@ export function GameGrid({ onStateChange }: GameGridProps) {
       e.stopPropagation();
       const snapped = snapToGrid(e.point.x, e.point.z);
 
+      const cellKey = `${snapped[0]},${snapped[1]}`;
+
       if (!pendingStart) {
+        if (occupied.has(cellKey)) return; // Can't start on existing path
         setPendingStart(snapped);
       } else {
         // Same cell — cancel
@@ -332,7 +339,11 @@ export function GameGrid({ onStateChange }: GameGridProps) {
           return;
         }
 
+        if (occupied.has(cellKey)) return; // Can't end on existing path
+
         const pathPoints = findPath(pendingStart, snapped, occupied);
+        if (!pathPoints) return; // No valid path — don't place
+
         const color = PATH_COLORS[paths.length % PATH_COLORS.length];
         const pathId = crypto.randomUUID();
         agentsRef.current.push({
@@ -365,7 +376,7 @@ export function GameGrid({ onStateChange }: GameGridProps) {
         onPointerLeave={() => setHover(null)}
       >
         <planeGeometry args={[GRID_SIZE * CELL_SIZE, GRID_SIZE * CELL_SIZE]} />
-        <meshStandardMaterial color="#f5f5f0" />
+        <meshStandardMaterial color="#1b2838" />
       </mesh>
 
       <GridLines />
@@ -374,10 +385,11 @@ export function GameGrid({ onStateChange }: GameGridProps) {
       <HoverCell position={hover} />
 
       {/* Pending start marker */}
-      {pendingStart && <Marker position={pendingStart} color="#e84393" />}
+      {pendingStart && <Marker position={pendingStart} color="#ff6b9d" />}
 
       {/* Preview path */}
-      {previewPath && <PathLine path={previewPath} color={previewColor} opacity={0.4} />}
+      {previewResult?.path && <PathLine path={previewResult.path} color={previewColor} opacity={0.4} />}
+      {previewResult?.blocked && hover && <HoverCell position={hover} blocked />}
 
       {/* Paths */}
       {paths.map((p) => (
@@ -432,12 +444,12 @@ const overlayStyles: Record<string, React.CSSProperties> = {
     justifyContent: "space-between",
     alignItems: "center",
     padding: "0.5rem 1rem",
-    background: "rgba(255,255,255,0.9)",
-    borderBottom: "1px solid #ddd",
+    background: "rgba(15,25,35,0.85)",
+    borderBottom: "1px solid #1e3044",
   },
   info: {
     fontSize: "14px",
-    color: "#555",
+    color: "#8899aa",
   },
   buttons: {
     display: "flex",
@@ -446,8 +458,9 @@ const overlayStyles: Record<string, React.CSSProperties> = {
   btn: {
     padding: "4px 12px",
     borderRadius: "4px",
-    border: "1px solid #ccc",
-    background: "white",
+    border: "1px solid #2a3a4a",
+    background: "#1b2838",
+    color: "#8899aa",
     cursor: "pointer",
     fontSize: "13px",
   },
