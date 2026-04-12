@@ -18,7 +18,16 @@ app.get("/ws", (c) => {
 
 // Serve static files in production
 app.use("/*", serveStatic({ root: "./dist" }));
-app.use("/*", serveStatic({ path: "./dist/index.html" }));
+
+// SPA fallback — serve index.html for unmatched routes
+app.get("*", async (c) => {
+  try {
+    const html = await Deno.readTextFile("./dist/index.html");
+    return c.html(html);
+  } catch {
+    return c.text("Not found", 404);
+  }
+});
 
 const port = Number(Deno.env.get("PORT") ?? 8000);
 console.log(`Server running on http://localhost:${port}`);
