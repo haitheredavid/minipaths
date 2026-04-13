@@ -6,13 +6,52 @@ const GRID_SIZE = 20;
 const CELL_SIZE = 1;
 const HALF = (GRID_SIZE * CELL_SIZE) / 2;
 
+// --- Interfaces ---
+
 interface Path {
   id: string;
   points: [number, number][];
   color: string;
 }
 
-const PATH_COLORS = ["#7c6cf0", "#00d2a0", "#ff7b5c", "#3da5f4", "#ffd166", "#ff6b9d"];
+interface SpawnPoint {
+  id: string;
+  position: [number, number];
+  color: string;
+  spawnTimer: number;     // seconds until next agent spawn
+  spawnInterval: number;  // seconds between spawns
+}
+
+interface DestinationPoint {
+  id: string;
+  position: [number, number];
+  color: string;
+  demand: number;         // accumulated pins
+  maxDemand: number;      // game over threshold
+  demandTimer: number;    // seconds until next demand pin
+  demandInterval: number; // seconds between demand increases
+}
+
+interface Agent {
+  id: string;
+  pathId: string;
+  progress: number;   // 0 → path.length-1, fractional
+  speed: number;      // cells per second
+  forward: boolean;   // travel direction along path
+  color: string;
+  spawnId: string;    // which spawn point created this agent
+  destId: string;     // target destination
+  returning: boolean; // heading back to spawn after delivery
+}
+
+const POINT_COLORS = ["#7c6cf0", "#00d2a0", "#ff7b5c", "#3da5f4"];
+const PATH_COLOR = "#5a6270";
+const AGENT_SPEED = 2.5;
+const INITIAL_SPAWN_INTERVAL = 4;  // seconds between agent spawns
+const INITIAL_DEMAND_INTERVAL = 6; // seconds between demand pin increases
+const NEW_PAIR_INTERVAL = 30;      // seconds between new spawn/dest pair appearing
+
+// --- Utilities ---
 
 function snapToGrid(x: number, z: number): [number, number] {
   return [
@@ -26,7 +65,6 @@ function findPath(
   end: [number, number],
   occupied: Set<string>
 ): [number, number][] | null {
-  // A* on grid
   const key = (p: [number, number]) => `${p[0]},${p[1]}`;
   const dirs: [number, number][] = [
     [CELL_SIZE, 0],
@@ -48,7 +86,6 @@ function findPath(
     const ck = key(current.pos);
 
     if (Math.abs(current.pos[0] - end[0]) < 0.01 && Math.abs(current.pos[1] - end[1]) < 0.01) {
-      // Reconstruct
       const path: [number, number][] = [current.pos];
       let k = ck;
       while (cameFrom.has(k)) {
@@ -66,7 +103,6 @@ function findPath(
       ];
       const nk = key(next);
 
-      // Bounds check
       if (
         next[0] < -HALF + CELL_SIZE / 2 ||
         next[0] > HALF - CELL_SIZE / 2 ||
@@ -74,7 +110,6 @@ function findPath(
         next[1] > HALF - CELL_SIZE / 2
       ) continue;
 
-      // Skip occupied unless it's start or end
       if (occupied.has(nk) && nk !== key(start) && nk !== key(end)) continue;
 
       const tentG = current.g + CELL_SIZE;
@@ -86,13 +121,84 @@ function findPath(
     }
   }
 
-  // No path found
   return null;
 }
 
 function heuristic(a: [number, number], b: [number, number]): number {
   return Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]);
 }
+
+function posKey(p: [number, number]): string {
+  return `${p[0]},${p[1]}`;
+}
+
+function posEqual(a: [number, number], b: [number, number]): boolean {
+  return Math.abs(a[0] - b[0]) < 0.01 && Math.abs(a[1] - b[1]) < 0.01;
+}
+
+/** Pick a random unoccupied grid cell */
+function randomGridPos(usedPositions: Set<string>): [number, number] {
+  let pos: [number, number];
+  let attempts = 0;
+  do {
+    const gx = Math.floor(Math.random() * GRID_SIZE);
+    const gz = Math.floor(Math.random() * GRID_SIZE);
+    pos = [gx * CELL_SIZE - HALF + CELL_SIZE / 2, gz * CELL_SIZE - HALF + CELL_SIZE / 2];
+    attempts++;
+  } while (usedPositions.has(posKey(pos)) && attempts < 200);
+  usedPositions.add(posKey(pos));
+  return pos;
+}
+
+/** Generate initial spawn/destination pairs with some distance between them */
+function generatePointPairs(count: number): { spawns: SpawnPoint[]; destinations: DestinationPoint[] } {
+  const used = new Set<string>();
+  const spawns: SpawnPoint[] = [];
+  const destinations: DestinationPoint[] = [];
+
+  for (let i = 0; i < count; i++) {
+    const color = POINT_COLORS[i % POINT_COLORS.length];
+
+    // Place spawn point
+    let spawnPos: [number, number];
+    let destPos: [number, number];
+    let tries = 0;
+
+    do {
+      spawnPos = randomGridPos(used);
+      // Remove from used temporarily to allow distance check
+      used.delete(posKey(spawnPos));
+      destPos = randomGridPos(used);
+      used.delete(posKey(destPos));
+      tries++;
+    } while (heuristic(spawnPos, destPos) < 6 && tries < 50);
+
+    used.add(posKey(spawnPos));
+    used.add(posKey(destPos));
+
+    spawns.push({
+      id: crypto.randomUUID(),
+      position: spawnPos,
+      color,
+      spawnTimer: INITIAL_SPAWN_INTERVAL,
+      spawnInterval: INITIAL_SPAWN_INTERVAL,
+    });
+
+    destinations.push({
+      id: crypto.randomUUID(),
+      position: destPos,
+      color,
+      demand: 1,
+      maxDemand: 7,
+      demandTimer: INITIAL_DEMAND_INTERVAL,
+      demandInterval: INITIAL_DEMAND_INTERVAL,
+    });
+  }
+
+  return { spawns, destinations };
+}
+
+// --- Rendering Components ---
 
 function GridLines() {
   const points = useMemo(() => {
@@ -187,24 +293,64 @@ function Marker({ position, color }: { position: [number, number]; color: string
   );
 }
 
-interface Agent {
-  id: string;
-  pathId: string;
-  progress: number; // 0 → path.length-1, fractional
-  speed: number;    // cells per second
-  forward: boolean; // direction (ping-pong)
-  color: string;
+/** Spawn point — small house shape (box with pointed roof) */
+function SpawnPointMesh({ point }: { point: SpawnPoint }) {
+  return (
+    <group position={[point.position[0], 0, point.position[1]]}>
+      {/* House body */}
+      <mesh position={[0, 0.2, 0]}>
+        <boxGeometry args={[0.6, 0.4, 0.6]} />
+        <meshStandardMaterial color={point.color} />
+      </mesh>
+      {/* Roof */}
+      <mesh position={[0, 0.5, 0]} rotation={[0, Math.PI / 4, 0]}>
+        <coneGeometry args={[0.45, 0.3, 4]} />
+        <meshStandardMaterial color={point.color} toneMapped={false} />
+      </mesh>
+    </group>
+  );
 }
 
-const AGENT_SPEED = 2.5;
+/** Destination point — taller building with demand pips */
+function DestinationPointMesh({ point }: { point: DestinationPoint }) {
+  // Show demand as small spheres stacked beside building
+  const pips: JSX.Element[] = [];
+  for (let i = 0; i < point.demand; i++) {
+    const row = i % 4;
+    const col = Math.floor(i / 4);
+    pips.push(
+      <mesh key={i} position={[0.5 + col * 0.2, 0.1, -0.3 + row * 0.2]}>
+        <sphereGeometry args={[0.06, 8, 8]} />
+        <meshStandardMaterial color={point.demand >= point.maxDemand - 1 ? "#ff2222" : "#ffffff"} />
+      </mesh>
+    );
+  }
 
+  return (
+    <group position={[point.position[0], 0, point.position[1]]}>
+      {/* Building body */}
+      <mesh position={[0, 0.35, 0]}>
+        <boxGeometry args={[0.7, 0.7, 0.7]} />
+        <meshStandardMaterial color={point.color} />
+      </mesh>
+      {/* Flag/indicator on top */}
+      <mesh position={[0, 0.8, 0]}>
+        <boxGeometry args={[0.15, 0.2, 0.15]} />
+        <meshStandardMaterial color="#ffffff" />
+      </mesh>
+      {/* Demand pips */}
+      {pips}
+    </group>
+  );
+}
+
+/** Agent mesh — small colored car box */
 function AgentMesh({ agent, path }: { agent: Agent; path: [number, number][] }) {
   const meshRef = useRef<THREE.Mesh>(null);
 
   useFrame((_, delta) => {
     if (!meshRef.current || path.length < 2) return;
 
-    // Move progress
     const step = agent.speed * delta;
     if (agent.forward) {
       agent.progress += step;
@@ -220,7 +366,6 @@ function AgentMesh({ agent, path }: { agent: Agent; path: [number, number][] }) 
       }
     }
 
-    // Lerp position between path points
     const idx = Math.floor(agent.progress);
     const frac = agent.progress - idx;
     const curr = path[Math.min(idx, path.length - 1)];
@@ -231,7 +376,6 @@ function AgentMesh({ agent, path }: { agent: Agent; path: [number, number][] }) 
 
     meshRef.current.position.set(x, 0.25, z);
 
-    // Face movement direction
     if (Math.abs(next[0] - curr[0]) > 0.01 || Math.abs(next[1] - curr[1]) > 0.01) {
       const angle = Math.atan2(next[0] - curr[0], next[1] - curr[1]);
       meshRef.current.rotation.y = angle;
@@ -257,36 +401,133 @@ function HoverCell({ position, blocked = false }: { position: [number, number] |
   );
 }
 
+// --- Find which spawn/dest a path endpoint touches ---
+
+function findPointAtPos<T extends { position: [number, number] }>(
+  points: T[],
+  pos: [number, number]
+): T | undefined {
+  return points.find((p) => posEqual(p.position, pos));
+}
+
+/** Find a path that connects a spawn to a matching destination */
+function findConnectingPath(
+  spawn: SpawnPoint,
+  destinations: DestinationPoint[],
+  paths: Path[]
+): { path: Path; dest: DestinationPoint; spawnAtStart: boolean } | null {
+  const matchingDests = destinations.filter((d) => d.color === spawn.color);
+
+  for (const path of paths) {
+    const start = path.points[0];
+    const end = path.points[path.points.length - 1];
+
+    for (const dest of matchingDests) {
+      // spawn at start, dest at end
+      if (posEqual(start, spawn.position) && posEqual(end, dest.position)) {
+        return { path, dest, spawnAtStart: true };
+      }
+      // spawn at end, dest at start
+      if (posEqual(end, spawn.position) && posEqual(start, dest.position)) {
+        return { path, dest, spawnAtStart: false };
+      }
+    }
+  }
+
+  return null;
+}
+
+// --- Config ---
+
+export interface GameConfig {
+  agentSpeed: number;
+  spawnInterval: number;
+  demandInterval: number;
+  newPairInterval: number;
+  maxDemand: number;
+}
+
+export const DEFAULT_CONFIG: GameConfig = {
+  agentSpeed: AGENT_SPEED,
+  spawnInterval: INITIAL_SPAWN_INTERVAL,
+  demandInterval: INITIAL_DEMAND_INTERVAL,
+  newPairInterval: NEW_PAIR_INTERVAL,
+  maxDemand: 7,
+};
+
+// --- Main Game Component ---
+
 interface GameGridProps {
+  config: GameConfig;
   onStateChange: (
     pathCount: number,
     pending: boolean,
     clearFn: () => void,
     undoFn: () => void,
+    score: number,
+    gameOver: boolean,
   ) => void;
 }
 
-export function GameGrid({ onStateChange }: GameGridProps) {
+export function GameGrid({ config, onStateChange }: GameGridProps) {
   const [paths, setPaths] = useState<Path[]>([]);
   const [pendingStart, setPendingStart] = useState<[number, number] | null>(null);
   const [hover, setHover] = useState<[number, number] | null>(null);
   const planeRef = useRef<THREE.Mesh>(null);
   const agentsRef = useRef<Agent[]>([]);
+  const scoreRef = useRef(0);
+  const gameOverRef = useRef(false);
+  const newPairTimerRef = useRef(NEW_PAIR_INTERVAL);
+
+  // Generate spawn/destination pairs once
+  const [spawnPoints, setSpawnPoints] = useState<SpawnPoint[]>([]);
+  const [destPoints, setDestPoints] = useState<DestinationPoint[]>([]);
+
+  // Initialize points on first render
+  useEffect(() => {
+    const { spawns, destinations } = generatePointPairs(3);
+    setSpawnPoints(spawns);
+    setDestPoints(destinations);
+  }, []);
+
+  // Build occupied set including spawn/dest positions
+  const pointPositions = useMemo(() => {
+    const set = new Set<string>();
+    for (const sp of spawnPoints) set.add(posKey(sp.position));
+    for (const dp of destPoints) set.add(posKey(dp.position));
+    return set;
+  }, [spawnPoints, destPoints]);
 
   const occupied = useMemo(() => {
     const set = new Set<string>();
     for (const path of paths) {
       for (const p of path.points) {
-        set.add(`${p[0]},${p[1]}`);
+        set.add(posKey(p));
       }
     }
     return set;
   }, [paths]);
 
+  // For pathfinding, roads can't overlap but CAN start/end on spawn/dest points
+  const pathfindingOccupied = useMemo(() => {
+    const set = new Set(occupied);
+    // Block spawn/dest positions so paths can't route through them
+    // (findPath already allows start/end on occupied cells)
+    for (const key of pointPositions) set.add(key);
+    return set;
+  }, [occupied, pointPositions]);
+
   const handleClear = useCallback(() => {
     setPaths([]);
     setPendingStart(null);
     agentsRef.current = [];
+    scoreRef.current = 0;
+    gameOverRef.current = false;
+    newPairTimerRef.current = NEW_PAIR_INTERVAL;
+    // Re-generate points
+    const { spawns, destinations } = generatePointPairs(3);
+    setSpawnPoints(spawns);
+    setDestPoints(destinations);
   }, []);
 
   const handleUndo = useCallback(() => {
@@ -301,20 +542,151 @@ export function GameGrid({ onStateChange }: GameGridProps) {
 
   // Sync state up to parent
   useEffect(() => {
-    onStateChange(paths.length, !!pendingStart, handleClear, handleUndo);
+    onStateChange(paths.length, !!pendingStart, handleClear, handleUndo, scoreRef.current, gameOverRef.current);
   }, [paths.length, pendingStart, onStateChange, handleClear, handleUndo]);
+
+  // --- Game tick: spawn agents + accumulate demand ---
+  useFrame((_, delta) => {
+    if (gameOverRef.current) return;
+
+    // Update demand on destinations
+    for (const dest of destPoints) {
+      dest.demandTimer -= delta;
+      if (dest.demandTimer <= 0) {
+        dest.demandTimer = dest.demandInterval;
+        dest.demand += 1;
+
+        if (dest.demand >= dest.maxDemand) {
+          gameOverRef.current = true;
+          onStateChange(paths.length, !!pendingStart, handleClear, handleUndo, scoreRef.current, true);
+          return;
+        }
+      }
+    }
+
+    // Periodically add new spawn/dest pair to increase difficulty
+    newPairTimerRef.current -= delta;
+    if (newPairTimerRef.current <= 0) {
+      newPairTimerRef.current = config.newPairInterval;
+      const used = new Set<string>();
+      for (const sp of spawnPoints) used.add(posKey(sp.position));
+      for (const dp of destPoints) used.add(posKey(dp.position));
+      for (const path of paths) {
+        for (const p of path.points) used.add(posKey(p));
+      }
+      const colorIdx = spawnPoints.length % POINT_COLORS.length;
+      const color = POINT_COLORS[colorIdx];
+      let spawnPos: [number, number];
+      let destPos: [number, number];
+      let tries = 0;
+      do {
+        spawnPos = randomGridPos(used);
+        used.delete(posKey(spawnPos));
+        destPos = randomGridPos(used);
+        used.delete(posKey(destPos));
+        tries++;
+      } while (heuristic(spawnPos, destPos) < 6 && tries < 50);
+      used.add(posKey(spawnPos));
+      used.add(posKey(destPos));
+
+      setSpawnPoints((prev) => [...prev, {
+        id: crypto.randomUUID(),
+        position: spawnPos,
+        color,
+        spawnTimer: config.spawnInterval,
+        spawnInterval: config.spawnInterval,
+      }]);
+      setDestPoints((prev) => [...prev, {
+        id: crypto.randomUUID(),
+        position: destPos,
+        color,
+        demand: 1,
+        maxDemand: config.maxDemand,
+        demandTimer: config.demandInterval,
+        demandInterval: config.demandInterval,
+      }]);
+    }
+
+    // Spawn agents from spawn points that have connected paths
+    for (const spawn of spawnPoints) {
+      const connection = findConnectingPath(spawn, destPoints, paths);
+      if (!connection) continue;
+
+      // Only spawn if destination has demand
+      if (connection.dest.demand <= 0) continue;
+
+      spawn.spawnTimer -= delta;
+      if (spawn.spawnTimer <= 0) {
+        spawn.spawnTimer = spawn.spawnInterval;
+
+        agentsRef.current.push({
+          id: crypto.randomUUID(),
+          pathId: connection.path.id,
+          progress: connection.spawnAtStart ? 0 : connection.path.points.length - 1,
+          speed: config.agentSpeed,
+          forward: connection.spawnAtStart,
+          color: spawn.color,
+          spawnId: spawn.id,
+          destId: connection.dest.id,
+          returning: false,
+        });
+      }
+    }
+
+    // Check agents reaching destinations
+    const toRemove: string[] = [];
+    for (const agent of agentsRef.current) {
+      const path = paths.find((p) => p.id === agent.pathId);
+      if (!path) { toRemove.push(agent.id); continue; }
+
+      if (!agent.returning) {
+        // Heading to destination
+        const atEnd = agent.forward
+          ? agent.progress >= path.points.length - 1 - 0.05
+          : agent.progress <= 0.05;
+
+        if (atEnd) {
+          // Arrived at destination — reduce demand, score point
+          const dest = destPoints.find((d) => d.id === agent.destId);
+          if (dest && dest.demand > 0) {
+            dest.demand -= 1;
+            scoreRef.current += 1;
+            onStateChange(paths.length, !!pendingStart, handleClear, handleUndo, scoreRef.current, false);
+          }
+          // Start returning
+          agent.returning = true;
+          agent.forward = !agent.forward;
+        }
+      } else {
+        // Returning to spawn
+        const atHome = agent.forward
+          ? agent.progress >= path.points.length - 1 - 0.05
+          : agent.progress <= 0.05;
+
+        if (atHome) {
+          toRemove.push(agent.id);
+        }
+      }
+    }
+
+    if (toRemove.length > 0) {
+      agentsRef.current = agentsRef.current.filter((a) => !toRemove.includes(a.id));
+    }
+  });
 
   const previewResult = useMemo(() => {
     if (!pendingStart || !hover) return null;
     if (pendingStart[0] === hover[0] && pendingStart[1] === hover[1]) return null;
-    if (occupied.has(`${hover[0]},${hover[1]}`)) return { path: null, blocked: true };
-    const path = findPath(pendingStart, hover, occupied);
+    // Allow ending on spawn/dest positions
+    const isEndOnPoint = pointPositions.has(posKey(hover));
+    if (occupied.has(posKey(hover)) && !isEndOnPoint) return { path: null, blocked: true };
+    const path = findPath(pendingStart, hover, pathfindingOccupied);
     return { path, blocked: path === null };
-  }, [pendingStart, hover, occupied]);
+  }, [pendingStart, hover, occupied, pathfindingOccupied, pointPositions]);
 
   const previewColor = previewResult?.blocked
     ? "#ff0000"
-    : PATH_COLORS[paths.length % PATH_COLORS.length];
+    : PATH_COLOR;
 
   const handlePointerMove = useCallback((e: ThreeEvent<PointerEvent>) => {
     e.stopPropagation();
@@ -324,36 +696,29 @@ export function GameGrid({ onStateChange }: GameGridProps) {
 
   const handleClick = useCallback(
     (e: ThreeEvent<MouseEvent>) => {
+      if (gameOverRef.current) return;
       e.stopPropagation();
       const snapped = snapToGrid(e.point.x, e.point.z);
-
-      const cellKey = `${snapped[0]},${snapped[1]}`;
+      const cellKey = posKey(snapped);
+      const isOnPoint = pointPositions.has(cellKey);
 
       if (!pendingStart) {
-        if (occupied.has(cellKey)) return; // Can't start on existing path
+        // Can start on a spawn/dest point OR empty cell
+        if (occupied.has(cellKey) && !isOnPoint) return;
         setPendingStart(snapped);
       } else {
-        // Same cell — cancel
         if (snapped[0] === pendingStart[0] && snapped[1] === pendingStart[1]) {
           setPendingStart(null);
           return;
         }
 
-        if (occupied.has(cellKey)) return; // Can't end on existing path
+        if (occupied.has(cellKey) && !isOnPoint) return;
 
-        const pathPoints = findPath(pendingStart, snapped, occupied);
-        if (!pathPoints) return; // No valid path — don't place
+        const pathPoints = findPath(pendingStart, snapped, pathfindingOccupied);
+        if (!pathPoints) return;
 
-        const color = PATH_COLORS[paths.length % PATH_COLORS.length];
+        const color = PATH_COLOR;
         const pathId = crypto.randomUUID();
-        agentsRef.current.push({
-          id: crypto.randomUUID(),
-          pathId,
-          progress: 0,
-          speed: AGENT_SPEED,
-          forward: true,
-          color,
-        });
         setPaths((prev) => [
           ...prev,
           { id: pathId, points: pathPoints, color },
@@ -361,7 +726,7 @@ export function GameGrid({ onStateChange }: GameGridProps) {
         setPendingStart(null);
       }
     },
-    [pendingStart, occupied, paths.length]
+    [pendingStart, occupied, paths.length, pointPositions, pathfindingOccupied]
   );
 
   return (
@@ -391,6 +756,16 @@ export function GameGrid({ onStateChange }: GameGridProps) {
       {previewResult?.path && <PathLine path={previewResult.path} color={previewColor} opacity={0.4} />}
       {previewResult?.blocked && hover && <HoverCell position={hover} blocked />}
 
+      {/* Spawn points (houses) */}
+      {spawnPoints.map((sp) => (
+        <SpawnPointMesh key={sp.id} point={sp} />
+      ))}
+
+      {/* Destination points (buildings) */}
+      {destPoints.map((dp) => (
+        <DestinationPointMesh key={dp.id} point={dp} />
+      ))}
+
       {/* Paths */}
       {paths.map((p) => (
         <group key={p.id}>
@@ -410,28 +785,44 @@ export function GameGrid({ onStateChange }: GameGridProps) {
   );
 }
 
+// --- Overlay ---
+
 export function GameOverlay({
   pathCount,
   pending,
   onClear,
   onUndo,
+  score,
+  gameOver,
 }: {
   pathCount: number;
   pending: boolean;
   onClear: () => void;
   onUndo: () => void;
+  score: number;
+  gameOver: boolean;
 }) {
   return (
     <div style={overlayStyles.container}>
       <div style={overlayStyles.info}>
-        {pending ? "Click to set endpoint" : "Click to set start point"} | Paths: {pathCount}
+        {gameOver ? (
+          <span style={{ color: "#ff4444", fontWeight: "bold" }}>
+            GAME OVER — Score: {score}
+          </span>
+        ) : (
+          <>
+            {pending ? "Click to set endpoint" : "Click to set start point"}
+            {" | "}Paths: {pathCount}
+            {" | "}Score: {score}
+          </>
+        )}
       </div>
       <div style={overlayStyles.buttons}>
         <button style={overlayStyles.btn} onClick={onUndo} disabled={pathCount === 0}>
           Undo
         </button>
-        <button style={overlayStyles.btn} onClick={onClear} disabled={pathCount === 0}>
-          Clear All
+        <button style={overlayStyles.btn} onClick={onClear}>
+          {gameOver ? "New Game" : "Clear All"}
         </button>
       </div>
     </div>
