@@ -198,25 +198,69 @@ function generatePointPairs(count: number): { spawns: SpawnPoint[]; destinations
   return { spawns, destinations };
 }
 
+// --- Intro Animation Helpers ---
+
+/** Ease-out back (overshoot bounce) */
+function easeOutBack(t: number): number {
+  const c1 = 1.70158;
+  const c3 = c1 + 1;
+  return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
+}
+
+/** Ease-out cubic */
+function easeOutCubic(t: number): number {
+  return 1 - Math.pow(1 - t, 3);
+}
+
+type IntroPhase = "grid" | "spawners" | "destinations" | "done";
+
+const INTRO_GRID_DURATION = 0.8;       // seconds for grid to fully draw
+const INTRO_SPAWN_DURATION = 0.4;      // seconds per spawner pop
+const INTRO_SPAWN_STAGGER = 0.12;      // stagger between spawners
+const INTRO_DEST_DURATION = 0.4;       // seconds per destination pop
+const INTRO_DEST_STAGGER = 0.12;       // stagger between destinations
+
 // --- Rendering Components ---
 
-function GridLines() {
-  const points = useMemo(() => {
-    const pts: THREE.Vector3[] = [];
+function GridLines({ progress = 1 }: { progress?: number }) {
+  const geoRef = useRef<THREE.BufferGeometry>(null);
+
+  // All line segment data — pairs sorted by distance from center
+  const { allPoints, lineCount } = useMemo(() => {
+    const lines: { dist: number; pts: THREE.Vector3[] }[] = [];
     for (let i = 0; i <= GRID_SIZE; i++) {
       const pos = i * CELL_SIZE - HALF;
-      pts.push(new THREE.Vector3(pos, 0.01, -HALF), new THREE.Vector3(pos, 0.01, HALF));
-      pts.push(new THREE.Vector3(-HALF, 0.01, pos), new THREE.Vector3(HALF, 0.01, pos));
+      const dist = Math.abs(pos - 0); // distance from center
+      // vertical line
+      lines.push({
+        dist,
+        pts: [new THREE.Vector3(pos, 0.01, -HALF), new THREE.Vector3(pos, 0.01, HALF)],
+      });
+      // horizontal line
+      lines.push({
+        dist,
+        pts: [new THREE.Vector3(-HALF, 0.01, pos), new THREE.Vector3(HALF, 0.01, pos)],
+      });
     }
-    return pts;
+    // Sort by distance from center so inner lines draw first
+    lines.sort((a, b) => a.dist - b.dist);
+    const allPts = lines.flatMap((l) => l.pts);
+    return { allPoints: allPts, lineCount: lines.length };
   }, []);
+
+  // Update draw range based on progress
+  useEffect(() => {
+    if (!geoRef.current) return;
+    const visibleLines = Math.floor(easeOutCubic(Math.min(progress, 1)) * lineCount);
+    geoRef.current.setDrawRange(0, visibleLines * 2); // 2 vertices per line segment
+  }, [progress, lineCount]);
 
   return (
     <lineSegments>
-      <bufferGeometry>
+      <bufferGeometry ref={geoRef}>
         <bufferAttribute
           attach="attributes-position"
-          args={[new Float32Array(points.flatMap((p) => [p.x, p.y, p.z])), 3]}
+          args={[new Float32Array(allPoints.flatMap((p) => [p.x, p.y, p.z])), 3]}
         />
       </bufferGeometry>
       <lineBasicMaterial color="#2a3a4a" />
@@ -294,9 +338,9 @@ function Marker({ position, color }: { position: [number, number]; color: string
 }
 
 /** Spawn point — small house shape (box with pointed roof) */
-function SpawnPointMesh({ point }: { point: SpawnPoint }) {
+function SpawnPointMesh({ point, scale = 1 }: { point: SpawnPoint; scale?: number }) {
   return (
-    <group position={[point.position[0], 0, point.position[1]]}>
+    <group position={[point.position[0], 0, point.position[1]]} scale={[scale, scale, scale]}>
       {/* House body */}
       <mesh position={[0, 0.2, 0]}>
         <boxGeometry args={[0.6, 0.4, 0.6]} />
@@ -312,7 +356,7 @@ function SpawnPointMesh({ point }: { point: SpawnPoint }) {
 }
 
 /** Destination point — taller building with demand pips */
-function DestinationPointMesh({ point }: { point: DestinationPoint }) {
+function DestinationPointMesh({ point, scale = 1 }: { point: DestinationPoint; scale?: number }) {
   // Show demand as small spheres stacked beside building
   const pips: JSX.Element[] = [];
   for (let i = 0; i < point.demand; i++) {
@@ -327,7 +371,7 @@ function DestinationPointMesh({ point }: { point: DestinationPoint }) {
   }
 
   return (
-    <group position={[point.position[0], 0, point.position[1]]}>
+    <group position={[point.position[0], 0, point.position[1]]} scale={[scale, scale, scale]}>
       {/* Building body */}
       <mesh position={[0, 0.35, 0]}>
         <boxGeometry args={[0.7, 0.7, 0.7]} />
@@ -479,6 +523,13 @@ export function GameGrid({ config, onStateChange }: GameGridProps) {
   const gameOverRef = useRef(false);
   const newPairTimerRef = useRef(NEW_PAIR_INTERVAL);
 
+  // --- Intro animation state ---
+  const [introPhase, setIntroPhase] = useState<IntroPhase>("grid");
+  const introTimerRef = useRef(0);
+  const [gridProgress, setGridProgress] = useState(0);
+  const [spawnScales, setSpawnScales] = useState<number[]>([]);
+  const [destScales, setDestScales] = useState<number[]>([]);
+
   // Generate spawn/destination pairs once
   const [spawnPoints, setSpawnPoints] = useState<SpawnPoint[]>([]);
   const [destPoints, setDestPoints] = useState<DestinationPoint[]>([]);
@@ -524,6 +575,12 @@ export function GameGrid({ config, onStateChange }: GameGridProps) {
     scoreRef.current = 0;
     gameOverRef.current = false;
     newPairTimerRef.current = NEW_PAIR_INTERVAL;
+    // Reset intro animation
+    setIntroPhase("grid");
+    introTimerRef.current = 0;
+    setGridProgress(0);
+    setSpawnScales([]);
+    setDestScales([]);
     // Re-generate points
     const { spawns, destinations } = generatePointPairs(3);
     setSpawnPoints(spawns);
@@ -545,8 +602,53 @@ export function GameGrid({ config, onStateChange }: GameGridProps) {
     onStateChange(paths.length, !!pendingStart, handleClear, handleUndo, scoreRef.current, gameOverRef.current);
   }, [paths.length, pendingStart, onStateChange, handleClear, handleUndo]);
 
+  // --- Intro animation tick ---
+  useFrame((_, delta) => {
+    if (introPhase === "done") return;
+
+    introTimerRef.current += delta;
+    const t = introTimerRef.current;
+
+    if (introPhase === "grid") {
+      const p = Math.min(t / INTRO_GRID_DURATION, 1);
+      setGridProgress(p);
+      if (p >= 1) {
+        setIntroPhase("spawners");
+        introTimerRef.current = 0;
+        setSpawnScales(spawnPoints.map(() => 0));
+      }
+    } else if (introPhase === "spawners") {
+      const scales = spawnPoints.map((_, i) => {
+        const startTime = i * INTRO_SPAWN_STAGGER;
+        const elapsed = Math.max(0, t - startTime);
+        const raw = Math.min(elapsed / INTRO_SPAWN_DURATION, 1);
+        return easeOutBack(raw);
+      });
+      setSpawnScales(scales);
+      const totalDuration = (spawnPoints.length - 1) * INTRO_SPAWN_STAGGER + INTRO_SPAWN_DURATION;
+      if (t >= totalDuration) {
+        setIntroPhase("destinations");
+        introTimerRef.current = 0;
+        setDestScales(destPoints.map(() => 0));
+      }
+    } else if (introPhase === "destinations") {
+      const scales = destPoints.map((_, i) => {
+        const startTime = i * INTRO_DEST_STAGGER;
+        const elapsed = Math.max(0, t - startTime);
+        const raw = Math.min(elapsed / INTRO_DEST_DURATION, 1);
+        return easeOutBack(raw);
+      });
+      setDestScales(scales);
+      const totalDuration = (destPoints.length - 1) * INTRO_DEST_STAGGER + INTRO_DEST_DURATION;
+      if (t >= totalDuration) {
+        setIntroPhase("done");
+      }
+    }
+  });
+
   // --- Game tick: spawn agents + accumulate demand ---
   useFrame((_, delta) => {
+    if (introPhase !== "done") return;
     if (gameOverRef.current) return;
 
     // Update demand on destinations
@@ -696,6 +798,7 @@ export function GameGrid({ config, onStateChange }: GameGridProps) {
 
   const handleClick = useCallback(
     (e: ThreeEvent<MouseEvent>) => {
+      if (introPhase !== "done") return;
       if (gameOverRef.current) return;
       e.stopPropagation();
       const snapped = snapToGrid(e.point.x, e.point.z);
@@ -726,7 +829,7 @@ export function GameGrid({ config, onStateChange }: GameGridProps) {
         setPendingStart(null);
       }
     },
-    [pendingStart, occupied, paths.length, pointPositions, pathfindingOccupied]
+    [pendingStart, occupied, paths.length, pointPositions, pathfindingOccupied, introPhase]
   );
 
   return (
@@ -744,10 +847,10 @@ export function GameGrid({ config, onStateChange }: GameGridProps) {
         <meshStandardMaterial color="#1b2838" />
       </mesh>
 
-      <GridLines />
+      <GridLines progress={gridProgress} />
 
       {/* Hover indicator */}
-      <HoverCell position={hover} />
+      {introPhase === "done" && <HoverCell position={hover} />}
 
       {/* Pending start marker */}
       {pendingStart && <Marker position={pendingStart} color="#ff6b9d" />}
@@ -757,14 +860,16 @@ export function GameGrid({ config, onStateChange }: GameGridProps) {
       {previewResult?.blocked && hover && <HoverCell position={hover} blocked />}
 
       {/* Spawn points (houses) */}
-      {spawnPoints.map((sp) => (
-        <SpawnPointMesh key={sp.id} point={sp} />
-      ))}
+      {(introPhase === "spawners" || introPhase === "destinations" || introPhase === "done") &&
+        spawnPoints.map((sp, i) => (
+          <SpawnPointMesh key={sp.id} point={sp} scale={introPhase === "done" ? 1 : (spawnScales[i] ?? 0)} />
+        ))}
 
       {/* Destination points (buildings) */}
-      {destPoints.map((dp) => (
-        <DestinationPointMesh key={dp.id} point={dp} />
-      ))}
+      {(introPhase === "destinations" || introPhase === "done") &&
+        destPoints.map((dp, i) => (
+          <DestinationPointMesh key={dp.id} point={dp} scale={introPhase === "done" ? 1 : (destScales[i] ?? 0)} />
+        ))}
 
       {/* Paths */}
       {paths.map((p) => (
@@ -794,6 +899,9 @@ export function GameOverlay({
   onUndo,
   score,
   gameOver,
+  username,
+  onLogout,
+  onLeaderboard,
 }: {
   pathCount: number;
   pending: boolean;
@@ -801,10 +909,16 @@ export function GameOverlay({
   onUndo: () => void;
   score: number;
   gameOver: boolean;
+  username?: string;
+  onLogout?: () => void;
+  onLeaderboard?: () => void;
 }) {
   return (
     <div style={overlayStyles.container}>
       <div style={overlayStyles.info}>
+        {username && (
+          <span style={{ color: "#6c5ce7", marginRight: "8px" }}>{username}</span>
+        )}
         {gameOver ? (
           <span style={{ color: "#ff4444", fontWeight: "bold" }}>
             GAME OVER — Score: {score}
@@ -824,6 +938,16 @@ export function GameOverlay({
         <button style={overlayStyles.btn} onClick={onClear}>
           {gameOver ? "New Game" : "Clear All"}
         </button>
+        {onLeaderboard && (
+          <button style={overlayStyles.btn} onClick={onLeaderboard}>
+            Scores
+          </button>
+        )}
+        {onLogout && (
+          <button style={{ ...overlayStyles.btn, marginLeft: "8px" }} onClick={onLogout}>
+            Logout
+          </button>
+        )}
       </div>
     </div>
   );

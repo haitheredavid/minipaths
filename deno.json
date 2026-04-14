@@ -1,10 +1,10 @@
 {
   "tasks": {
     "dev": "deno task dev:backend & deno task dev:frontend",
-    "dev:backend": "deno run --watch --allow-net --allow-read --allow-env server/main.ts",
+    "dev:backend": "deno run --watch --allow-net --allow-read --allow-env --allow-ffi --allow-write server/main.ts",
     "dev:frontend": "deno run -A npm:vite@6 --config client/vite.config.ts",
     "build": "deno run -A npm:vite@6 build --config client/vite.config.ts",
-    "preview": "deno run --allow-net --allow-read --allow-env server/main.ts",
+    "preview": "deno run --allow-net --allow-read --allow-env --allow-ffi --allow-write server/main.ts",
     "deploy": "deno task build"
   },
   "imports": {
@@ -16,7 +16,9 @@
     "react-dom/client": "npm:react-dom@19/client",
     "three": "npm:three@0.172",
     "@react-three/fiber": "npm:@react-three/fiber@9",
-    "@react-three/drei": "npm:@react-three/drei@10"
+    "@react-three/drei": "npm:@react-three/drei@10",
+    "@db/sqlite": "jsr:@db/sqlite@0.12",
+    "bcrypt": "https://deno.land/x/bcrypt@v0.4.1/mod.ts"
   },
   "nodeModulesDir": "auto",
   "compilerOptions": {
