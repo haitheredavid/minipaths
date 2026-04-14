@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { useAuth } from "./AuthContext.tsx";
 
 interface Message {
   id: string;
@@ -8,10 +9,9 @@ interface Message {
 }
 
 export function Chat() {
+  const { user } = useAuth();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
-  const [username, setUsername] = useState("");
-  const [joined, setJoined] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -37,29 +37,12 @@ export function Chat() {
   }, [messages]);
 
   const send = useCallback(() => {
-    if (!input.trim() || !wsRef.current) return;
-    wsRef.current.send(JSON.stringify({ type: "message", user: username, text: input }));
+    if (!input.trim() || !wsRef.current || !user) return;
+    wsRef.current.send(JSON.stringify({ type: "message", user: user.username, text: input }));
     setInput("");
-  }, [input, username]);
+  }, [input, user]);
 
-  if (!joined) {
-    return (
-      <div style={styles.container}>
-        <div style={styles.joinBox}>
-          <input
-            style={styles.input}
-            placeholder="Enter your name..."
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && username.trim() && setJoined(true)}
-          />
-          <button style={styles.button} onClick={() => username.trim() && setJoined(true)}>
-            Join Chat
-          </button>
-        </div>
-      </div>
-    );
-  }
+  if (!user) return null;
 
   return (
     <div style={styles.container}>
@@ -95,14 +78,6 @@ const styles: Record<string, React.CSSProperties> = {
     margin: "0 auto",
     maxWidth: "500px",
     overflow: "hidden",
-  },
-  joinBox: {
-    display: "flex",
-    gap: "8px",
-    padding: "1rem",
-    alignItems: "center",
-    justifyContent: "center",
-    height: "100%",
   },
   messageList: {
     flex: 1,

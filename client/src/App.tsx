@@ -1,16 +1,24 @@
-import { useState, useRef, useMemo } from "react";
+import { useState, useRef, useMemo, useCallback } from "react";
 import { Canvas } from "@react-three/fiber";
 import { OrthographicCamera } from "@react-three/drei";
-import { useControls } from "leva";
+import { Leva, useControls } from "leva";
 import { GameGrid, GameOverlay, DEFAULT_CONFIG, type GameConfig } from "./Grid.tsx";
+import { useAuth } from "./AuthContext.tsx";
+import { AuthScreen } from "./AuthScreen.tsx";
+import { apiPost } from "./api.ts";
+import { Leaderboard } from "./Leaderboard.tsx";
 
 export function App() {
+  const { user, loading, logout } = useAuth();
+  const [showLeaderboard, setShowLeaderboard] = useState(false);
   const [pathCount, setPathCount] = useState(0);
   const [pending, setPending] = useState(false);
   const [score, setScore] = useState(0);
   const [gameOver, setGameOver] = useState(false);
   const clearRef = useRef<() => void>(() => {});
   const undoRef = useRef<() => void>(() => {});
+  const gameStartRef = useRef<number>(Date.now());
+  const scoreSavedRef = useRef(false);
 
   const controls = useControls("Spawning", {
     agentSpeed: { value: DEFAULT_CONFIG.agentSpeed, min: 0.5, max: 10, step: 0.5, label: "Agent Speed" },
@@ -28,15 +36,52 @@ export function App() {
     maxDemand: controls.maxDemand,
   }), [controls.agentSpeed, controls.spawnInterval, controls.demandInterval, controls.newPairInterval, controls.maxDemand]);
 
+  const saveScore = useCallback(async (finalScore: number) => {
+    if (scoreSavedRef.current) return;
+    scoreSavedRef.current = true;
+    const durationSeconds = Math.floor((Date.now() - gameStartRef.current) / 1000);
+    try {
+      await apiPost("/api/game/sessions", {
+        score: finalScore,
+        durationSeconds,
+        config,
+      });
+    } catch {
+      // Score save failed silently — game still playable
+    }
+  }, [config]);
+
+  if (loading) {
+    return (
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100vh", background: "#0f1923", color: "#8899aa", fontFamily: "system-ui" }}>
+        Loading...
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <AuthScreen />;
+  }
+
   return (
     <div style={{ fontFamily: "system-ui", height: "100vh", display: "flex", flexDirection: "column", background: "#0f1923" }}>
+      <Leva collapsed />
       <GameOverlay
         pathCount={pathCount}
         pending={pending}
-        onClear={() => { clearRef.current(); setScore(0); setGameOver(false); }}
+        onClear={() => {
+          clearRef.current();
+          setScore(0);
+          setGameOver(false);
+          gameStartRef.current = Date.now();
+          scoreSavedRef.current = false;
+        }}
         onUndo={() => undoRef.current()}
         score={score}
         gameOver={gameOver}
+        username={user.username}
+        onLogout={logout}
+        onLeaderboard={() => setShowLeaderboard(true)}
       />
       <Canvas
         style={{ flex: 1 }}
@@ -61,10 +106,14 @@ export function App() {
             clearRef.current = clearFn;
             undoRef.current = undoFn;
             setScore(newScore);
+            if (isGameOver && !gameOver) {
+              saveScore(newScore);
+            }
             setGameOver(isGameOver);
           }}
         />
       </Canvas>
+      {showLeaderboard && <Leaderboard onClose={() => setShowLeaderboard(false)} />}
     </div>
   );
 }
