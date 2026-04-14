@@ -2,6 +2,7 @@ import { Database } from "@db/sqlite";
 
 const DB_PATH = "./data/minipaths.db";
 
+try { Deno.mkdirSync("./data", { recursive: true }); } catch { /* exists */ }
 const db = new Database(DB_PATH);
 db.exec("PRAGMA journal_mode = WAL");
 db.exec("PRAGMA foreign_keys = ON");
