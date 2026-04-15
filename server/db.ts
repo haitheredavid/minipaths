@@ -1,86 +1,4 @@
-import { Database } from "@db/sqlite";
-
-const DB_PATH = "./data/minipaths.db";
-
-try { Deno.mkdirSync("./data", { recursive: true }); } catch { /* exists */ }
-const db = new Database(DB_PATH);
-db.exec("PRAGMA journal_mode = WAL");
-db.exec("PRAGMA foreign_keys = ON");
-
-// --- Migrations ---
-
-db.exec(`CREATE TABLE IF NOT EXISTS _migrations (version INTEGER PRIMARY KEY)`);
-
-const migrations: string[] = [
-  // v1: core tables
-  `
-  CREATE TABLE users (
-    id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
-    username TEXT NOT NULL UNIQUE COLLATE NOCASE,
-    password_hash TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-  );
-
-  CREATE TABLE sessions (
-    token TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    expires_at TEXT NOT NULL
-  );
-  CREATE INDEX idx_sessions_user ON sessions(user_id);
-  CREATE INDEX idx_sessions_expires ON sessions(expires_at);
-
-  CREATE TABLE game_sessions (
-    id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
-    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    score INTEGER NOT NULL DEFAULT 0,
-    duration_seconds INTEGER,
-    config_json TEXT,
-    started_at TEXT NOT NULL DEFAULT (datetime('now')),
-    ended_at TEXT
-  );
-  CREATE INDEX idx_game_sessions_user ON game_sessions(user_id);
-  CREATE INDEX idx_game_sessions_score ON game_sessions(score DESC);
-
-  CREATE TABLE rooms (
-    id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
-    name TEXT NOT NULL,
-    created_by TEXT REFERENCES users(id),
-    max_players INTEGER NOT NULL DEFAULT 4,
-    state TEXT NOT NULL DEFAULT 'waiting',
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-  );
-
-  CREATE TABLE room_members (
-    room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
-    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    joined_at TEXT NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (room_id, user_id)
-  );
-  `,
-];
-
-function runMigrations() {
-  const row = db.prepare("SELECT MAX(version) as v FROM _migrations").get() as
-    | { v: number | null }
-    | undefined;
-  const current = row?.v ?? 0;
-
-  for (let i = current; i < migrations.length; i++) {
-    db.exec("BEGIN");
-    try {
-      db.exec(migrations[i]);
-      db.exec(`INSERT INTO _migrations VALUES (${i + 1})`);
-      db.exec("COMMIT");
-      console.log(`Migration ${i + 1} applied`);
-    } catch (e) {
-      db.exec("ROLLBACK");
-      throw e;
-    }
-  }
-}
-
-runMigrations();
+const kv = await Deno.openKv();
 
 // --- Types ---
 
@@ -116,92 +34,127 @@ export interface LeaderboardEntry {
 
 // --- User queries ---
 
-export function createUser(username: string, passwordHash: string): User {
+export async function createUser(username: string, passwordHash: string): Promise<User> {
   const id = crypto.randomUUID().replace(/-/g, "");
-  db.prepare(
-    "INSERT INTO users (id, username, password_hash) VALUES (?, ?, ?)",
-  ).run(id, username, passwordHash);
-  return findUserById(id)!;
+  const now = new Date().toISOString();
+  const user: User = { id, username, password_hash: passwordHash, created_at: now };
+
+  const result = await kv.atomic()
+    .check({ key: ["users_by_username", username.toLowerCase()], versionstamp: null })
+    .set(["users", id], user)
+    .set(["users_by_username", username.toLowerCase()], id)
+    .commit();
+
+  if (!result.ok) throw new Error("Username already taken");
+  return user;
 }
 
-export function findUserByUsername(username: string): User | null {
-  return (
-    (db
-      .prepare("SELECT * FROM users WHERE username = ? COLLATE NOCASE")
-      .get(username) as User | undefined) ?? null
-  );
+export async function findUserByUsername(username: string): Promise<User | null> {
+  const idEntry = await kv.get<string>(["users_by_username", username.toLowerCase()]);
+  if (!idEntry.value) return null;
+  const userEntry = await kv.get<User>(["users", idEntry.value]);
+  return userEntry.value;
 }
 
-export function findUserById(id: string): User | null {
-  return (
-    (db.prepare("SELECT * FROM users WHERE id = ?").get(id) as
-      | User
-      | undefined) ?? null
-  );
+export async function findUserById(id: string): Promise<User | null> {
+  const entry = await kv.get<User>(["users", id]);
+  return entry.value;
 }
 
 // --- Session queries ---
 
 const SESSION_DURATION_DAYS = 7;
 
-export function createSession(userId: string): Session {
+export async function createSession(userId: string): Promise<Session> {
   const token = crypto.randomUUID();
-  const expiresAt = new Date(
-    Date.now() + SESSION_DURATION_DAYS * 24 * 60 * 60 * 1000,
-  ).toISOString();
-  db.prepare(
-    "INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)",
-  ).run(token, userId, expiresAt);
-  return { token, user_id: userId, created_at: new Date().toISOString(), expires_at: expiresAt };
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + SESSION_DURATION_DAYS * 24 * 60 * 60 * 1000);
+  const session: Session = {
+    token,
+    user_id: userId,
+    created_at: now.toISOString(),
+    expires_at: expiresAt.toISOString(),
+  };
+
+  await kv.atomic()
+    .set(["sessions", token], session, { expireIn: SESSION_DURATION_DAYS * 24 * 60 * 60 * 1000 })
+    .commit();
+
+  return session;
 }
 
-export function findSession(token: string): Session | null {
-  const session = db
-    .prepare("SELECT * FROM sessions WHERE token = ? AND expires_at > datetime('now')")
-    .get(token) as Session | undefined;
-  return session ?? null;
+export async function findSession(token: string): Promise<Session | null> {
+  const entry = await kv.get<Session>(["sessions", token]);
+  if (!entry.value) return null;
+  if (new Date(entry.value.expires_at) <= new Date()) {
+    await kv.delete(["sessions", token]);
+    return null;
+  }
+  return entry.value;
 }
 
-export function deleteSession(token: string): void {
-  db.prepare("DELETE FROM sessions WHERE token = ?").run(token);
+export async function deleteSession(token: string): Promise<void> {
+  await kv.delete(["sessions", token]);
 }
 
-export function deleteExpiredSessions(): void {
-  db.prepare("DELETE FROM sessions WHERE expires_at <= datetime('now')").run();
+export async function deleteExpiredSessions(): Promise<void> {
+  // KV expireIn handles this automatically — no-op
 }
 
 // --- Game session queries ---
 
-export function saveGameSession(
+// Pad score for lexicographic DESC ordering: 999999999 - score
+function invertScore(score: number): string {
+  return String(999999999 - score).padStart(9, "0");
+}
+
+export async function saveGameSession(
   userId: string,
   score: number,
   durationSeconds: number | null,
   configJson: string | null,
-): GameSession {
+): Promise<GameSession> {
   const id = crypto.randomUUID().replace(/-/g, "");
-  db.prepare(
-    `INSERT INTO game_sessions (id, user_id, score, duration_seconds, config_json, ended_at)
-     VALUES (?, ?, ?, ?, ?, datetime('now'))`,
-  ).run(id, userId, score, durationSeconds, configJson);
-  return db.prepare("SELECT * FROM game_sessions WHERE id = ?").get(id) as GameSession;
+  const now = new Date().toISOString();
+  const session: GameSession = {
+    id,
+    user_id: userId,
+    score,
+    duration_seconds: durationSeconds,
+    config_json: configJson,
+    started_at: now,
+    ended_at: now,
+  };
+
+  const user = await findUserById(userId);
+  const username = user?.username ?? "Unknown";
+
+  await kv.atomic()
+    .set(["game_sessions", id], session)
+    .set(["game_sessions_by_user", userId, now, id], id)
+    .set(["leaderboard", invertScore(score), id], { username, score, started_at: now } satisfies LeaderboardEntry)
+    .commit();
+
+  return session;
 }
 
-export function getUserGameHistory(userId: string, limit = 20): GameSession[] {
-  return db
-    .prepare(
-      "SELECT * FROM game_sessions WHERE user_id = ? ORDER BY started_at DESC LIMIT ?",
-    )
-    .all(userId, limit) as GameSession[];
+export async function getUserGameHistory(userId: string, limit = 20): Promise<GameSession[]> {
+  const sessions: GameSession[] = [];
+  const iter = kv.list<string>({ prefix: ["game_sessions_by_user", userId] }, { reverse: true, limit });
+  for await (const entry of iter) {
+    const gs = await kv.get<GameSession>(["game_sessions", entry.value]);
+    if (gs.value) sessions.push(gs.value);
+  }
+  return sessions;
 }
 
-export function getLeaderboard(limit = 10): LeaderboardEntry[] {
-  return db
-    .prepare(
-      `SELECT u.username, g.score, g.started_at
-       FROM game_sessions g JOIN users u ON g.user_id = u.id
-       ORDER BY g.score DESC LIMIT ?`,
-    )
-    .all(limit) as LeaderboardEntry[];
+export async function getLeaderboard(limit = 10): Promise<LeaderboardEntry[]> {
+  const entries: LeaderboardEntry[] = [];
+  const iter = kv.list<LeaderboardEntry>({ prefix: ["leaderboard"] }, { limit });
+  for await (const entry of iter) {
+    entries.push(entry.value);
+  }
+  return entries;
 }
 
-export { db };
+export { kv };

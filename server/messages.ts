@@ -25,10 +25,9 @@ function broadcast(data: string) {
   }
 }
 
-export function handleWebSocket(req: Request): Response {
-  // Authenticate via session cookie on the upgrade request
+export async function handleWebSocket(req: Request): Promise<Response> {
   const cookieHeader = req.headers.get("cookie");
-  const auth = parseSessionFromCookieHeader(cookieHeader);
+  const auth = await parseSessionFromCookieHeader(cookieHeader);
 
   const { socket, response } = Deno.upgradeWebSocket(req);
 
@@ -47,7 +46,6 @@ export function handleWebSocket(req: Request): Response {
       const data = JSON.parse(event.data);
       if (data.type === "message" && data.text) {
         const client = clients.get(socket);
-        // Use server-verified username, not client-supplied
         const username = client?.username ?? "Anonymous";
         const msg: Message = {
           id: crypto.randomUUID(),

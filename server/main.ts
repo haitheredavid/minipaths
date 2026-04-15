@@ -60,9 +60,9 @@ auth.post("/login", async (c) => {
   }
 });
 
-auth.post("/logout", (c) => {
+auth.post("/logout", async (c) => {
   const token = getSessionToken(c);
-  if (token) logout(token);
+  if (token) await logout(token);
   clearSessionCookie(c);
   return c.json({});
 });
@@ -115,8 +115,8 @@ app.get("/api/hello", (c) => {
 });
 
 // WebSocket endpoint
-app.get("/ws", (c) => {
-  return handleWebSocket(c.req.raw);
+app.get("/ws", async (c) => {
+  return await handleWebSocket(c.req.raw);
 });
 
 // Serve static files in production
