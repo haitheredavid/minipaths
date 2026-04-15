@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useAuth, ApiError } from "./AuthContext.tsx";
 
 export function AuthScreen() {
-  const { login, register } = useAuth();
+  const { login, register, loginAsGuest } = useAuth();
   const [mode, setMode] = useState<"login" | "register">("login");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -66,6 +66,26 @@ export function AuthScreen() {
             {submitting ? "..." : mode === "login" ? "Log In" : "Create Account"}
           </button>
         </form>
+        <div style={styles.divider}>
+          <span style={styles.dividerText}>or</span>
+        </div>
+        <button
+          style={styles.guestButton}
+          onClick={async () => {
+            setError("");
+            setSubmitting(true);
+            try {
+              await loginAsGuest();
+            } catch (err) {
+              setError(err instanceof ApiError ? err.message : "Something went wrong");
+            } finally {
+              setSubmitting(false);
+            }
+          }}
+          disabled={submitting}
+        >
+          Play as Guest
+        </button>
       </div>
     </div>
   );
@@ -150,5 +170,28 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: "15px",
     fontWeight: 600,
     marginTop: "4px",
+  },
+  divider: {
+    display: "flex",
+    alignItems: "center",
+    gap: "12px",
+    margin: "16px 0 4px",
+  },
+  dividerText: {
+    color: "#8899aa",
+    fontSize: "13px",
+    flex: 1,
+    textAlign: "center" as const,
+  },
+  guestButton: {
+    width: "100%",
+    padding: "10px",
+    borderRadius: "6px",
+    border: "1px solid #2a3a4a",
+    background: "transparent",
+    color: "#8899aa",
+    cursor: "pointer",
+    fontSize: "14px",
+    fontWeight: 600,
   },
 };

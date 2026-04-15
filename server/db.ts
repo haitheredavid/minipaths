@@ -6,6 +6,7 @@ export interface User {
   id: string;
   username: string;
   password_hash: string;
+  is_guest: boolean;
   created_at: string;
 }
 
@@ -37,7 +38,7 @@ export interface LeaderboardEntry {
 export async function createUser(username: string, passwordHash: string): Promise<User> {
   const id = crypto.randomUUID().replace(/-/g, "");
   const now = new Date().toISOString();
-  const user: User = { id, username, password_hash: passwordHash, created_at: now };
+  const user: User = { id, username, password_hash: passwordHash, is_guest: false, created_at: now };
 
   const result = await kv.atomic()
     .check({ key: ["users_by_username", username.toLowerCase()], versionstamp: null })
@@ -46,6 +47,21 @@ export async function createUser(username: string, passwordHash: string): Promis
     .commit();
 
   if (!result.ok) throw new Error("Username already taken");
+  return user;
+}
+
+export async function createGuestUser(): Promise<User> {
+  const id = crypto.randomUUID().replace(/-/g, "");
+  const suffix = id.slice(0, 6);
+  const username = `Guest_${suffix}`;
+  const now = new Date().toISOString();
+  const user: User = { id, username, password_hash: "", is_guest: true, created_at: now };
+
+  await kv.atomic()
+    .set(["users", id], user)
+    .set(["users_by_username", username.toLowerCase()], id)
+    .commit();
+
   return user;
 }
 
@@ -64,11 +80,13 @@ export async function findUserById(id: string): Promise<User | null> {
 // --- Session queries ---
 
 const SESSION_DURATION_DAYS = 7;
+const GUEST_SESSION_DURATION_DAYS = 1;
 
-export async function createSession(userId: string): Promise<Session> {
+export async function createSession(userId: string, isGuest = false): Promise<Session> {
   const token = crypto.randomUUID();
   const now = new Date();
-  const expiresAt = new Date(now.getTime() + SESSION_DURATION_DAYS * 24 * 60 * 60 * 1000);
+  const days = isGuest ? GUEST_SESSION_DURATION_DAYS : SESSION_DURATION_DAYS;
+  const expiresAt = new Date(now.getTime() + days * 24 * 60 * 60 * 1000);
   const session: Session = {
     token,
     user_id: userId,
@@ -77,7 +95,7 @@ export async function createSession(userId: string): Promise<Session> {
   };
 
   await kv.atomic()
-    .set(["sessions", token], session, { expireIn: SESSION_DURATION_DAYS * 24 * 60 * 60 * 1000 })
+    .set(["sessions", token], session, { expireIn: days * 24 * 60 * 60 * 1000 })
     .commit();
 
   return session;

@@ -3,6 +3,7 @@ import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import bcrypt from "bcryptjs";
 import {
   createUser,
+  createGuestUser,
   findUserByUsername,
   findUserById,
   createSession,
@@ -62,6 +63,12 @@ export async function login(
   if (!valid) throw new AuthError("Invalid username or password", 401);
 
   const session = await createSession(user.id);
+  return { user, token: session.token };
+}
+
+export async function loginAsGuest(): Promise<{ user: User; token: string }> {
+  const user = await createGuestUser();
+  const session = await createSession(user.id, true);
   return { user, token: session.token };
 }
 

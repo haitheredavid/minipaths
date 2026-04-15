@@ -7,6 +7,7 @@ import {
   requireAuth,
   register,
   login,
+  loginAsGuest,
   logout,
   setSessionCookie,
   clearSessionCookie,
@@ -58,6 +59,12 @@ auth.post("/login", async (c) => {
     if (e instanceof AuthError) return c.json({ error: e.message }, e.status as ContentfulStatusCode);
     throw e;
   }
+});
+
+auth.post("/guest", async (c) => {
+  const { user, token } = await loginAsGuest();
+  setSessionCookie(c, token);
+  return c.json({ user: { id: user.id, username: user.username } }, 201);
 });
 
 auth.post("/logout", async (c) => {
