@@ -6,6 +6,7 @@
     "npm:@react-three/drei@10": "10.4.4_@react-three+fiber@9.2.0__react@19.1.0__react-dom@19.1.0___react@19.1.0__three@0.172.0__@types+react@19.1.8_react@19.1.0_react-dom@19.1.0__react@19.1.0_three@0.172.0_@types+react@19.1.8_@types+three@0.178.0",
     "npm:@react-three/fiber@9": "9.2.0_react@19.1.0_react-dom@19.1.0__react@19.1.0_three@0.172.0_@types+react@19.1.8",
     "npm:@vitejs/plugin-react@4": "4.7.0_vite@6.3.5",
+    "npm:bcryptjs@2": "2.4.3",
     "npm:leva@~0.10.1": "0.10.1_react@19.1.0_react-dom@19.1.0__react@19.1.0",
     "npm:react-dom@19": "19.1.0_react@19.1.0",
     "npm:react@19": "19.1.0",
@@ -799,6 +800,9 @@
       "integrity": "sha512-VSnGQAOLtP5mib/DPyg2/t+Tlv65NTBz83BJBJvmLVHHuKJVaDOBvJJykiT5TR++em5nfAySPccDZDa4oSrn8A==",
       "bin": true
     },
+    "bcryptjs@2.4.3": {
+      "integrity": "sha512-V/Hy/X9Vt7f3BbPJEi8BdVFMByHi+jNXrYkW3huaybV/kQ0KJg0Y6PkEMbn+zeT+i+SiKZ/HMqJGIIt4LZDqNQ=="
+    },
     "bidi-js@1.0.3": {
       "integrity": "sha512-RKshQI1R3YQ+n9YJz2QQ147P66ELpa1FQEg20Dk8oW9t2KgLbpDLLp9aGZ7y8WHSshDknG0bknqGw5/tyCs5tw==",
       "dependencies": [
@@ -1423,6 +1427,7 @@
       "jsr:@std/assert@1",
       "npm:@react-three/drei@10",
       "npm:@react-three/fiber@9",
+      "npm:bcryptjs@2",
       "npm:leva@~0.10.1",
       "npm:react-dom@19",
       "npm:react@19",

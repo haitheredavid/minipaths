@@ -1,6 +1,6 @@
 import { Context, Next } from "hono";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
-import { hashSync, compareSync } from "bcrypt";
+import bcrypt from "bcryptjs";
 import {
   createUser,
   findUserByUsername,
@@ -45,7 +45,7 @@ export async function register(
   const existing = await findUserByUsername(username);
   if (existing) throw new AuthError("Username already taken", 409);
 
-  const passwordHash = hashSync(password);
+  const passwordHash = bcrypt.hashSync(password, 10);
   const user = await createUser(username, passwordHash);
   const session = await createSession(user.id);
   return { user, token: session.token };
@@ -58,7 +58,7 @@ export async function login(
   const user = await findUserByUsername(username);
   if (!user) throw new AuthError("Invalid username or password", 401);
 
-  const valid = compareSync(password, user.password_hash);
+  const valid = bcrypt.compareSync(password, user.password_hash);
   if (!valid) throw new AuthError("Invalid username or password", 401);
 
   const session = await createSession(user.id);
