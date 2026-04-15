@@ -19,6 +19,7 @@
     "@react-three/drei": "npm:@react-three/drei@10",
     "bcrypt": "https://deno.land/x/bcrypt@v0.4.1/mod.ts"
   },
+  "unstable": ["kv"],
   "nodeModulesDir": "auto",
   "compilerOptions": {
     "jsx": "react-jsx",
