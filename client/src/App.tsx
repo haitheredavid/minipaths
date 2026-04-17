@@ -86,6 +86,8 @@ export function App() {
       <Canvas
         style={{ flex: 1 }}
         orthographic
+        dpr={[1, 2]}
+        gl={{ antialias: true }}
         onCreated={({ gl }) => gl.setClearColor("#0f1923")}
       >
         <OrthographicCamera
@@ -96,8 +98,10 @@ export function App() {
           near={0.1}
           far={200}
         />
-        <ambientLight intensity={0.5} />
-        <directionalLight position={[10, 15, 10]} intensity={0.6} />
+        <hemisphereLight args={["#b8c8d8", "#1a2530", 0.7]} />
+        <ambientLight intensity={0.35} />
+        <directionalLight position={[8, 20, 12]} intensity={0.85} />
+        <directionalLight position={[-10, 12, -6]} intensity={0.25} color="#6a8abd" />
         <GameGrid
           config={config}
           onStateChange={(count, isPending, clearFn, undoFn, newScore, isGameOver) => {

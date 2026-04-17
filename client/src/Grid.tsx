@@ -44,8 +44,13 @@ interface Agent {
   returning: boolean; // heading back to spawn after delivery
 }
 
-const POINT_COLORS = ["#7c6cf0", "#00d2a0", "#ff7b5c", "#3da5f4"];
-const PATH_COLOR = "#5a6270";
+const OBJECT_SCALE = 1.2;
+const POINT_COLORS = ["#8b7bff", "#2ee0b0", "#ff8a6b", "#4db5ff"];
+const PATH_COLOR = "#4a5260";
+const PATH_EDGE_COLOR = "#6d7684";
+const PATH_CENTER_COLOR = "#d8c26a";
+const GROUND_COLOR = "#17222e";
+const GRID_LINE_COLOR = "#334659";
 const AGENT_SPEED = 2.5;
 const INITIAL_SPAWN_INTERVAL = 4;  // seconds between agent spawns
 const INITIAL_DEMAND_INTERVAL = 6; // seconds between demand pin increases
@@ -263,13 +268,13 @@ function GridLines({ progress = 1 }: { progress?: number }) {
           args={[new Float32Array(allPoints.flatMap((p) => [p.x, p.y, p.z])), 3]}
         />
       </bufferGeometry>
-      <lineBasicMaterial color="#2a3a4a" />
+      <lineBasicMaterial color={GRID_LINE_COLOR} />
     </lineSegments>
   );
 }
 
-function buildPathGeometry(path: [number, number][], yHeight: number): THREE.BufferGeometry {
-  const width = CELL_SIZE * 0.5;
+function buildPathGeometry(path: [number, number][], yHeight: number, widthScale = 0.5): THREE.BufferGeometry {
+  const width = CELL_SIZE * widthScale;
   const geo = new THREE.BufferGeometry();
   const vertices: number[] = [];
 
@@ -318,38 +323,88 @@ function buildPathGeometry(path: [number, number][], yHeight: number): THREE.Buf
   return geo;
 }
 
-function PathLine({ path, color, opacity = 1 }: { path: [number, number][]; color: string; opacity?: number }) {
-  const geometry = useMemo(() => buildPathGeometry(path, 0.05), [path]);
+function PathLine({ path, color, opacity = 1, edgeColor }: { path: [number, number][]; color: string; opacity?: number; edgeColor?: string }) {
+  const edgeGeometry = useMemo(() => buildPathGeometry(path, 0.045, 0.62 * OBJECT_SCALE), [path]);
+  const coreGeometry = useMemo(() => buildPathGeometry(path, 0.06, 0.48 * OBJECT_SCALE), [path]);
+  const centerGeometry = useMemo(() => buildPathGeometry(path, 0.066, 0.04 * OBJECT_SCALE), [path]);
+  const transparent = opacity < 1;
 
   return (
-    <mesh geometry={geometry}>
-      <meshBasicMaterial color={color} side={THREE.DoubleSide} transparent={opacity < 1} opacity={opacity} />
-    </mesh>
+    <group>
+      <mesh geometry={edgeGeometry}>
+        <meshBasicMaterial
+          color={edgeColor ?? PATH_EDGE_COLOR}
+          side={THREE.DoubleSide}
+          transparent={transparent}
+          opacity={opacity}
+        />
+      </mesh>
+      <mesh geometry={coreGeometry}>
+        <meshBasicMaterial
+          color={color}
+          side={THREE.DoubleSide}
+          transparent={transparent}
+          opacity={opacity}
+        />
+      </mesh>
+      {opacity >= 1 && (
+        <mesh geometry={centerGeometry}>
+          <meshBasicMaterial color={PATH_CENTER_COLOR} side={THREE.DoubleSide} />
+        </mesh>
+      )}
+    </group>
   );
 }
 
 function Marker({ position, color }: { position: [number, number]; color: string }) {
   return (
-    <mesh position={[position[0], 0.15, position[1]]}>
-      <cylinderGeometry args={[0.2, 0.2, 0.3, 16]} />
-      <meshStandardMaterial color={color} />
-    </mesh>
+    <group position={[position[0], 0, position[1]]} scale={[OBJECT_SCALE, OBJECT_SCALE, OBJECT_SCALE]}>
+      <mesh position={[0, 0.08, 0]}>
+        <cylinderGeometry args={[0.26, 0.28, 0.06, 24]} />
+        <meshStandardMaterial color="#0f1923" roughness={0.9} />
+      </mesh>
+      <mesh position={[0, 0.18, 0]}>
+        <cylinderGeometry args={[0.18, 0.2, 0.18, 24]} />
+        <meshStandardMaterial
+          color={color}
+          emissive={color}
+          emissiveIntensity={0.25}
+          roughness={0.55}
+        />
+      </mesh>
+    </group>
   );
 }
 
 /** Spawn point — small house shape (box with pointed roof) */
 function SpawnPointMesh({ point, scale = 1 }: { point: SpawnPoint; scale?: number }) {
+  const s = scale * OBJECT_SCALE;
   return (
-    <group position={[point.position[0], 0, point.position[1]]} scale={[scale, scale, scale]}>
+    <group position={[point.position[0], 0, point.position[1]]} scale={[s, s, s]}>
+      {/* Base pad */}
+      <mesh position={[0, 0.03, 0]}>
+        <boxGeometry args={[0.82, 0.06, 0.82]} />
+        <meshStandardMaterial color="#0d1720" roughness={0.9} />
+      </mesh>
       {/* House body */}
-      <mesh position={[0, 0.2, 0]}>
-        <boxGeometry args={[0.6, 0.4, 0.6]} />
-        <meshStandardMaterial color={point.color} />
+      <mesh position={[0, 0.24, 0]}>
+        <boxGeometry args={[0.62, 0.36, 0.62]} />
+        <meshStandardMaterial
+          color={point.color}
+          emissive={point.color}
+          emissiveIntensity={0.18}
+          roughness={0.5}
+        />
       </mesh>
       {/* Roof */}
-      <mesh position={[0, 0.5, 0]} rotation={[0, Math.PI / 4, 0]}>
-        <coneGeometry args={[0.45, 0.3, 4]} />
-        <meshStandardMaterial color={point.color} toneMapped={false} />
+      <mesh position={[0, 0.55, 0]} rotation={[0, Math.PI / 4, 0]}>
+        <coneGeometry args={[0.5, 0.34, 4]} />
+        <meshStandardMaterial
+          color={point.color}
+          emissive={point.color}
+          emissiveIntensity={0.35}
+          roughness={0.45}
+        />
       </mesh>
     </group>
   );
@@ -357,40 +412,72 @@ function SpawnPointMesh({ point, scale = 1 }: { point: SpawnPoint; scale?: numbe
 
 /** Destination point — taller building with demand pips */
 function DestinationPointMesh({ point, scale = 1 }: { point: DestinationPoint; scale?: number }) {
-  // Show demand as small spheres stacked beside building
+  // Demand pips: larger spheres arranged in a centered grid floating above building
   const pips: JSX.Element[] = [];
+  const MAX_PER_ROW = 4;
+  const SPACING = 0.22;
+  const PIP_RADIUS = 0.12;
+  const BASE_Y = 1.05;
+  const critical = point.demand >= point.maxDemand - 1;
   for (let i = 0; i < point.demand; i++) {
-    const row = i % 4;
-    const col = Math.floor(i / 4);
+    const row = Math.floor(i / MAX_PER_ROW);
+    const col = i % MAX_PER_ROW;
+    const inRow = Math.min(point.demand - row * MAX_PER_ROW, MAX_PER_ROW);
+    const x = (col - (inRow - 1) / 2) * SPACING;
+    const y = BASE_Y + row * SPACING;
     pips.push(
-      <mesh key={i} position={[0.5 + col * 0.2, 0.1, -0.3 + row * 0.2]}>
-        <sphereGeometry args={[0.06, 8, 8]} />
-        <meshStandardMaterial color={point.demand >= point.maxDemand - 1 ? "#ff2222" : "#ffffff"} />
+      <mesh key={i} position={[x, y, 0]}>
+        <sphereGeometry args={[PIP_RADIUS, 16, 16]} />
+        <meshStandardMaterial
+          color={critical ? "#ff2222" : "#ffffff"}
+          emissive={critical ? "#ff2222" : "#ffffff"}
+          emissiveIntensity={critical ? 0.6 : 0.2}
+          toneMapped={false}
+        />
       </mesh>
     );
   }
 
+  const s = scale * OBJECT_SCALE;
   return (
-    <group position={[point.position[0], 0, point.position[1]]} scale={[scale, scale, scale]}>
+    <group position={[point.position[0], 0, point.position[1]]} scale={[s, s, s]}>
+      {/* Base pad */}
+      <mesh position={[0, 0.03, 0]}>
+        <boxGeometry args={[0.88, 0.06, 0.88]} />
+        <meshStandardMaterial color="#0d1720" roughness={0.9} />
+      </mesh>
       {/* Building body */}
-      <mesh position={[0, 0.35, 0]}>
-        <boxGeometry args={[0.7, 0.7, 0.7]} />
-        <meshStandardMaterial color={point.color} />
+      <mesh position={[0, 0.4, 0]}>
+        <boxGeometry args={[0.72, 0.74, 0.72]} />
+        <meshStandardMaterial
+          color={point.color}
+          emissive={point.color}
+          emissiveIntensity={0.18}
+          roughness={0.5}
+        />
       </mesh>
-      {/* Flag/indicator on top */}
-      <mesh position={[0, 0.8, 0]}>
-        <boxGeometry args={[0.15, 0.2, 0.15]} />
-        <meshStandardMaterial color="#ffffff" />
+      {/* Roof cap accent */}
+      <mesh position={[0, 0.81, 0]}>
+        <boxGeometry args={[0.78, 0.06, 0.78]} />
+        <meshStandardMaterial
+          color={point.color}
+          emissive={point.color}
+          emissiveIntensity={0.5}
+          roughness={0.4}
+          toneMapped={false}
+        />
       </mesh>
-      {/* Demand pips */}
+      {/* Demand pips (centered above) */}
       {pips}
     </group>
   );
 }
 
-/** Agent mesh — small colored car box */
+/** Agent mesh — small colored car box, offset to right lane of travel */
+const LANE_OFFSET = 0.13 * OBJECT_SCALE;
+
 function AgentMesh({ agent, path }: { agent: Agent; path: [number, number][] }) {
-  const meshRef = useRef<THREE.Mesh>(null);
+  const meshRef = useRef<THREE.Group>(null);
 
   useFrame((_, delta) => {
     if (!meshRef.current || path.length < 2) return;
@@ -418,20 +505,44 @@ function AgentMesh({ agent, path }: { agent: Agent; path: [number, number][] }) 
     const x = curr[0] + (next[0] - curr[0]) * frac;
     const z = curr[1] + (next[1] - curr[1]) * frac;
 
-    meshRef.current.position.set(x, 0.25, z);
+    // Travel direction — flip when moving backward along the path
+    const travelSign = agent.forward ? 1 : -1;
+    const dirX = (next[0] - curr[0]) * travelSign;
+    const dirZ = (next[1] - curr[1]) * travelSign;
+    const len = Math.hypot(dirX, dirZ);
 
-    if (Math.abs(next[0] - curr[0]) > 0.01 || Math.abs(next[1] - curr[1]) > 0.01) {
-      const angle = Math.atan2(next[0] - curr[0], next[1] - curr[1]);
-      meshRef.current.rotation.y = angle;
+    if (len > 0.01) {
+      const ndx = dirX / len;
+      const ndz = dirZ / len;
+      // Right-hand lane: rotate travel dir -90° around Y → (ndz, -ndx)
+      const offsetX = ndz * LANE_OFFSET;
+      const offsetZ = -ndx * LANE_OFFSET;
+      meshRef.current.position.set(x + offsetX, 0.25, z + offsetZ);
+      meshRef.current.rotation.y = Math.atan2(ndx, ndz);
+    } else {
+      meshRef.current.position.set(x, 0.25, z);
     }
   });
 
   const startPos = path[0];
   return (
-    <mesh ref={meshRef} position={[startPos[0], 0.25, startPos[1]]}>
-      <boxGeometry args={[0.3, 0.2, 0.4]} />
-      <meshStandardMaterial color={agent.color} />
-    </mesh>
+    <group ref={meshRef} position={[startPos[0], 0.25, startPos[1]]} scale={[OBJECT_SCALE, OBJECT_SCALE, OBJECT_SCALE]}>
+      {/* Car body */}
+      <mesh position={[0, 0, 0]}>
+        <boxGeometry args={[0.2, 0.2, 0.42]} />
+        <meshStandardMaterial
+          color={agent.color}
+          emissive={agent.color}
+          emissiveIntensity={0.28}
+          roughness={0.4}
+        />
+      </mesh>
+      {/* Cabin / windshield accent */}
+      <mesh position={[0, 0.13, -0.02]}>
+        <boxGeometry args={[0.16, 0.06, 0.22]} />
+        <meshStandardMaterial color="#0f1923" roughness={0.3} />
+      </mesh>
+    </group>
   );
 }
 
@@ -440,7 +551,7 @@ function HoverCell({ position, blocked = false }: { position: [number, number] |
   return (
     <mesh position={[position[0], 0.02, position[1]]} rotation={[-Math.PI / 2, 0, 0]}>
       <planeGeometry args={[CELL_SIZE * 0.9, CELL_SIZE * 0.9]} />
-      <meshBasicMaterial color={blocked ? "#ff4444" : "#4a9eff"} transparent opacity={blocked ? 0.5 : 0.35} side={THREE.DoubleSide} />
+      <meshBasicMaterial color={blocked ? "#ff5566" : "#5eb2ff"} transparent opacity={blocked ? 0.55 : 0.4} side={THREE.DoubleSide} />
     </mesh>
   );
 }
@@ -844,7 +955,7 @@ export function GameGrid({ config, onStateChange }: GameGridProps) {
         onPointerLeave={() => setHover(null)}
       >
         <planeGeometry args={[GRID_SIZE * CELL_SIZE, GRID_SIZE * CELL_SIZE]} />
-        <meshStandardMaterial color="#1b2838" />
+        <meshStandardMaterial color={GROUND_COLOR} roughness={1} />
       </mesh>
 
       <GridLines progress={gridProgress} />

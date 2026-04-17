@@ -5,6 +5,7 @@ export default defineConfig({
   plugins: [react()],
   root: "./client",
   server: {
+    allowedHosts: ["host.docker.internal", "localhost"],
     proxy: {
       "/api": "http://localhost:8000",
       "/ws": {
