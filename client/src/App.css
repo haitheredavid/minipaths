@@ -10,7 +10,6 @@ body {
   min-height: 100vh;
 }
 
-#leva__root > div {
-  top: auto !important;
-  bottom: 10px !important;
+* {
+  -webkit-tap-highlight-color: transparent;
 }

@@ -1025,37 +1025,37 @@ export function GameOverlay({
   onLeaderboard?: () => void;
 }) {
   return (
-    <div style={overlayStyles.container}>
-      <div style={overlayStyles.info}>
-        {username && (
-          <span style={{ color: "#6c5ce7", marginRight: "8px" }}>{username}</span>
-        )}
+    <div className="bar">
+      <div className="bar__info">
+        {username && <span className="bar__user">{username}</span>}
         {gameOver ? (
-          <span style={{ color: "#ff4444", fontWeight: "bold" }}>
+          <span style={{ color: "var(--danger)", fontWeight: "bold" }}>
             GAME OVER — Score: {score}
           </span>
         ) : (
           <>
-            {pending ? "Click to set endpoint" : "Click to set start point"}
-            {" | "}Paths: {pathCount}
-            {" | "}Score: {score}
+            <span>{pending ? "Click to set endpoint" : "Click to set start"}</span>
+            <span className="bar__sep">|</span>
+            <span>Paths: {pathCount}</span>
+            <span className="bar__sep">|</span>
+            <span>Score: {score}</span>
           </>
         )}
       </div>
-      <div style={overlayStyles.buttons}>
-        <button style={overlayStyles.btn} onClick={onUndo} disabled={pathCount === 0}>
+      <div className="bar__actions">
+        <button className="btn" onClick={onUndo} disabled={pathCount === 0}>
           Undo
         </button>
-        <button style={overlayStyles.btn} onClick={onClear}>
-          {gameOver ? "New Game" : "Clear All"}
+        <button className="btn" onClick={onClear}>
+          {gameOver ? "New Game" : "Clear"}
         </button>
         {onLeaderboard && (
-          <button style={overlayStyles.btn} onClick={onLeaderboard}>
+          <button className="btn" onClick={onLeaderboard}>
             Scores
           </button>
         )}
         {onLogout && (
-          <button style={{ ...overlayStyles.btn, marginLeft: "8px" }} onClick={onLogout}>
+          <button className="btn" onClick={onLogout}>
             Logout
           </button>
         )}
@@ -1063,31 +1063,3 @@ export function GameOverlay({
     </div>
   );
 }
-
-const overlayStyles: Record<string, React.CSSProperties> = {
-  container: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    padding: "0.5rem 1rem",
-    background: "rgba(15,25,35,0.85)",
-    borderBottom: "1px solid #1e3044",
-  },
-  info: {
-    fontSize: "14px",
-    color: "#8899aa",
-  },
-  buttons: {
-    display: "flex",
-    gap: "8px",
-  },
-  btn: {
-    padding: "4px 12px",
-    borderRadius: "4px",
-    border: "1px solid #2a3a4a",
-    background: "#1b2838",
-    color: "#8899aa",
-    cursor: "pointer",
-    fontSize: "13px",
-  },
-};
