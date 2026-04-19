@@ -71,6 +71,29 @@ export type ClickMode = "build" | "claim" | "seize" | "treaty";
 
 export type TreatyResult = "accepted" | "rejected" | null;
 
+export interface PerSideStats {
+  claimsUsed: number;
+  seizesUsed: number;
+  treatiesAccepted: number;
+  treatiesProposed: number;
+  treatiesRejected: number;
+  pathsBuilt: number;
+}
+
+export interface DualStats {
+  player: PerSideStats;
+  bot: PerSideStats;
+}
+
+const EMPTY_STATS: PerSideStats = {
+  claimsUsed: 0,
+  seizesUsed: 0,
+  treatiesAccepted: 0,
+  treatiesProposed: 0,
+  treatiesRejected: 0,
+  pathsBuilt: 0,
+};
+
 const INITIAL_TOKENS: DualTokens = {
   player: { claim: 2, seize: 2 },
   bot: { claim: 2, seize: 2 },
@@ -876,28 +899,69 @@ function botUseTokens(args: {
 }
 
 /**
- * Bot evaluates a treaty proposal on `targetPath`.
- * Accepts iff bot has any spawn or destination within `radius` manhattan
- * units of any tile in the path (means bot would actually use it).
+ * Evaluate treaty proposal on `targetPath` for `evaluator` side.
+ * Accepts iff that side has spawn/dest within `radius` of any path tile.
  */
+function evaluateTreatyFor(
+  evaluator: OwnerId,
+  targetPath: Path,
+  spawnPoints: SpawnPoint[],
+  destPoints: DestinationPoint[],
+  radius = 4,
+): boolean {
+  const points: [number, number][] = [
+    ...spawnPoints.filter((s) => s.ownerId === evaluator).map((s) => s.position),
+    ...destPoints.filter((d) => d.ownerId === evaluator).map((d) => d.position),
+  ];
+  if (points.length === 0) return false;
+
+  for (const tile of targetPath.points) {
+    for (const p of points) {
+      if (heuristic(tile, p) <= radius) return true;
+    }
+  }
+  return false;
+}
+
 function botEvaluateTreaty(
   targetPath: Path,
   spawnPoints: SpawnPoint[],
   destPoints: DestinationPoint[],
   radius = 4,
 ): boolean {
-  const botPoints: [number, number][] = [
-    ...spawnPoints.filter((s) => s.ownerId === BOT).map((s) => s.position),
-    ...destPoints.filter((d) => d.ownerId === BOT).map((d) => d.position),
-  ];
-  if (botPoints.length === 0) return false;
+  return evaluateTreatyFor(BOT, targetPath, spawnPoints, destPoints, radius);
+}
 
-  for (const tile of targetPath.points) {
-    for (const bp of botPoints) {
-      if (heuristic(tile, bp) <= radius) return true;
-    }
-  }
-  return false;
+/**
+ * Bot picks a player path that bot would benefit from + that player would
+ * plausibly accept (player has spawns/dests near it). Fires occasionally.
+ */
+function botProposeTreaty(args: {
+  paths: Path[];
+  treatiedTiles: Set<string>;
+  spawnPoints: SpawnPoint[];
+  destPoints: DestinationPoint[];
+  onPropose: (path: Path, accepted: boolean) => void;
+}) {
+  // Random gate so bot doesn't spam treaties — ~25% chance per decision tick
+  if (Math.random() > 0.25) return;
+
+  const { paths, treatiedTiles, spawnPoints, destPoints, onPropose } = args;
+
+  // Candidate paths: player-owned, not already fully treatied, that bot would use
+  const candidates = paths.filter((p) => {
+    if (p.ownerId !== PLAYER) return false;
+    const allTreatied = p.points.every((pt) => treatiedTiles.has(posKey(pt)));
+    if (allTreatied) return false;
+    return botEvaluateTreaty(p, spawnPoints, destPoints);
+  });
+
+  if (candidates.length === 0) return;
+
+  const target = candidates[Math.floor(Math.random() * candidates.length)];
+  // Player auto-accepts bot proposals — speed bonus is incentive enough for prototype.
+  // (Future: surface accept/reject UI button to player.)
+  onPropose(target, true);
 }
 
 // --- Config ---
@@ -938,6 +1002,7 @@ export interface GameUiState {
   tokens: DualTokens;
   mode: ClickMode;
   treatyResult: TreatyResult;
+  stats: DualStats;
 }
 
 export interface GameHandlers {
@@ -970,6 +1035,10 @@ export function GameGrid({ config, onStateChange }: GameGridProps) {
   const [mode, setMode] = useState<ClickMode>("build");
   const [treatyResult, setTreatyResult] = useState<TreatyResult>(null);
   const treatyResultTimerRef = useRef<number | null>(null);
+  const [stats, setStats] = useState<DualStats>(() => ({
+    player: { ...EMPTY_STATS },
+    bot: { ...EMPTY_STATS },
+  }));
 
   // --- Intro animation state ---
   const [introPhase, setIntroPhase] = useState<IntroPhase>("grid");
@@ -1015,6 +1084,10 @@ export function GameGrid({ config, onStateChange }: GameGridProps) {
     });
     setMode("build");
     setTreatyResult(null);
+    setStats({
+      player: { ...EMPTY_STATS },
+      bot: { ...EMPTY_STATS },
+    });
     // Reset intro animation
     setIntroPhase("grid");
     introTimerRef.current = 0;
@@ -1059,10 +1132,11 @@ export function GameGrid({ config, onStateChange }: GameGridProps) {
         tokens,
         mode,
         treatyResult,
+        stats,
       },
       { clear: handleClear, undo: handleUndo, setMode },
     );
-  }, [paths.length, pendingStart, onStateChange, handleClear, handleUndo, tokens, mode, treatyResult]);
+  }, [paths.length, pendingStart, onStateChange, handleClear, handleUndo, tokens, mode, treatyResult, stats]);
 
   // --- Intro animation tick ---
   useFrame((_, delta) => {
@@ -1131,6 +1205,7 @@ export function GameGrid({ config, onStateChange }: GameGridProps) {
               tokens,
               mode,
               treatyResult,
+              stats,
             },
             { clear: handleClear, undo: handleUndo, setMode },
           );
@@ -1218,6 +1293,7 @@ export function GameGrid({ config, onStateChange }: GameGridProps) {
                 tokens,
                 mode,
                 treatyResult,
+                stats,
               },
               { clear: handleClear, undo: handleUndo, setMode },
             );
@@ -1255,6 +1331,7 @@ export function GameGrid({ config, onStateChange }: GameGridProps) {
     const newRoads = botGreedyConnect(spawnPoints, destPoints, paths, pointPositions, config.crossOwnerPlanningPenalty);
     if (newRoads.length > 0) {
       setPaths((prev) => [...prev, ...newRoads]);
+      setStats((s) => ({ ...s, bot: { ...s.bot, pathsBuilt: s.bot.pathsBuilt + newRoads.length } }));
     }
 
     // Bot token use — fires once per decision tick if heuristic matches
@@ -1268,6 +1345,7 @@ export function GameGrid({ config, onStateChange }: GameGridProps) {
         setSpawnPoints((prev) => prev.filter((s) => s.id !== spawnId));
         agentsRef.current = agentsRef.current.filter((a) => a.spawnId !== spawnId);
         setTokens((t) => ({ ...t, bot: { ...t.bot, claim: t.bot.claim - 1 } }));
+        setStats((s) => ({ ...s, bot: { ...s.bot, claimsUsed: s.bot.claimsUsed + 1 } }));
       },
       onSeize: (tileKey) => {
         setSeizedTiles((prev) => {
@@ -1276,6 +1354,41 @@ export function GameGrid({ config, onStateChange }: GameGridProps) {
           return next;
         });
         setTokens((t) => ({ ...t, bot: { ...t.bot, seize: t.bot.seize - 1 } }));
+        setStats((s) => ({ ...s, bot: { ...s.bot, seizesUsed: s.bot.seizesUsed + 1 } }));
+      },
+    });
+
+    // Bot proposes treaty (Phase F): occasional, on a player path near bot network
+    botProposeTreaty({
+      paths,
+      treatiedTiles,
+      spawnPoints,
+      destPoints,
+      onPropose: (path, accepted) => {
+        if (accepted) {
+          setTreatiedTiles((prev) => {
+            const next = new Set(prev);
+            for (const pt of path.points) next.add(posKey(pt));
+            return next;
+          });
+        }
+        setStats((s) => ({
+          ...s,
+          bot: {
+            ...s.bot,
+            treatiesProposed: s.bot.treatiesProposed + 1,
+            treatiesAccepted: s.bot.treatiesAccepted + (accepted ? 1 : 0),
+            treatiesRejected: s.bot.treatiesRejected + (accepted ? 0 : 1),
+          },
+        }));
+        setTreatyResult(accepted ? "accepted" : "rejected");
+        if (treatyResultTimerRef.current !== null) {
+          clearTimeout(treatyResultTimerRef.current);
+        }
+        treatyResultTimerRef.current = window.setTimeout(() => {
+          setTreatyResult(null);
+          treatyResultTimerRef.current = null;
+        }, 2200);
       },
     });
   });
@@ -1321,6 +1434,7 @@ export function GameGrid({ config, onStateChange }: GameGridProps) {
         // Remove agents from that spawn
         agentsRef.current = agentsRef.current.filter((a) => a.spawnId !== target.id);
         setTokens((t) => ({ ...t, player: { ...t.player, claim: t.player.claim - 1 } }));
+        setStats((s) => ({ ...s, player: { ...s.player, claimsUsed: s.player.claimsUsed + 1 } }));
         setMode("build");
         return;
       }
@@ -1341,6 +1455,15 @@ export function GameGrid({ config, onStateChange }: GameGridProps) {
             return next;
           });
         }
+        setStats((s) => ({
+          ...s,
+          player: {
+            ...s.player,
+            treatiesProposed: s.player.treatiesProposed + 1,
+            treatiesAccepted: s.player.treatiesAccepted + (accepted ? 1 : 0),
+            treatiesRejected: s.player.treatiesRejected + (accepted ? 0 : 1),
+          },
+        }));
         setTreatyResult(accepted ? "accepted" : "rejected");
         if (treatyResultTimerRef.current !== null) {
           clearTimeout(treatyResultTimerRef.current);
@@ -1366,6 +1489,7 @@ export function GameGrid({ config, onStateChange }: GameGridProps) {
           return next;
         });
         setTokens((t) => ({ ...t, player: { ...t.player, seize: t.player.seize - 1 } }));
+        setStats((s) => ({ ...s, player: { ...s.player, seizesUsed: s.player.seizesUsed + 1 } }));
         setMode("build");
         return;
       }
@@ -1391,6 +1515,7 @@ export function GameGrid({ config, onStateChange }: GameGridProps) {
           ...prev,
           { id: pathId, points: pathPoints, color, ownerId: PLAYER },
         ]);
+        setStats((s) => ({ ...s, player: { ...s.player, pathsBuilt: s.player.pathsBuilt + 1 } }));
         setPendingStart(null);
       }
     },
@@ -1523,29 +1648,24 @@ export function GameOverlay({
         )}
         {gameOver ? (
           <span style={{ color: "#ff4444", fontWeight: "bold" }}>
-            GAME OVER — {winner} · You {score.player} · Bot {score.bot}
+            GAME OVER — {winner}
           </span>
         ) : (
-          <>
-            {modeHint}
-            {" | "}Paths: {pathCount}
-            {" | "}
-            <span style={{ color: PLAYER_COLORS[0] }}>You {score.player}</span>
-            {" · "}
-            <span style={{ color: BOT_COLORS[0] }}>Bot {score.bot}</span>
-            {" | "}
-            <span style={{ color: "#aaa" }}>
-              Claim {tokens.player.claim} · Seize {tokens.player.seize}
-            </span>
+          <div style={{ display: "flex", alignItems: "center", gap: "14px", flexWrap: "wrap" }}>
+            <span>{modeHint}</span>
+            <span style={{ color: "#556677" }}>·</span>
+            <span>Paths: {pathCount}</span>
+            <span style={{ color: "#556677" }}>·</span>
+            <ScoreBar player={score.player} bot={score.bot} />
+            <span style={{ color: "#556677" }}>·</span>
+            <span style={{ color: "#ff8a3c" }}>◆ {tokens.player.claim}</span>
+            <span style={{ color: "#a86bff" }}>● {tokens.player.seize}</span>
             {treatyResult && (
-              <>
-                {" | "}
-                <span style={{ color: treatyResult === "accepted" ? "#5be0a6" : "#ff8a8a", fontWeight: "bold" }}>
-                  {treatyResult === "accepted" ? "TREATY ACCEPTED" : "TREATY REJECTED"}
-                </span>
-              </>
+              <span style={{ color: treatyResult === "accepted" ? "#5be0a6" : "#ff8a8a", fontWeight: "bold" }}>
+                {treatyResult === "accepted" ? "TREATY ACCEPTED" : "TREATY REJECTED"}
+              </span>
             )}
-          </>
+          </div>
         )}
       </div>
       <div style={overlayStyles.buttons}>
@@ -1616,6 +1736,152 @@ const overlayStyles: Record<string, React.CSSProperties> = {
     color: "#8899aa",
     cursor: "pointer",
     fontSize: "13px",
+  },
+};
+
+function ScoreBar({ player, bot }: { player: number; bot: number }) {
+  const total = Math.max(player + bot, 1);
+  const playerPct = (player / total) * 100;
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+      <span style={{ color: PLAYER_COLORS[0], fontWeight: 600, minWidth: "20px", textAlign: "right" }}>{player}</span>
+      <div style={{ width: "120px", height: "8px", borderRadius: "4px", background: "#1b2838", overflow: "hidden", display: "flex" }}>
+        <div style={{ width: `${playerPct}%`, background: PLAYER_COLORS[0], transition: "width 0.3s" }} />
+        <div style={{ width: `${100 - playerPct}%`, background: BOT_COLORS[0], transition: "width 0.3s" }} />
+      </div>
+      <span style={{ color: BOT_COLORS[0], fontWeight: 600, minWidth: "20px" }}>{bot}</span>
+    </div>
+  );
+}
+
+// --- End Game Modal ---
+
+export function EndGameModal({
+  score,
+  stats,
+  onRestart,
+}: {
+  score: DualScore;
+  stats: DualStats;
+  onRestart: () => void;
+}) {
+  const winner =
+    score.player > score.bot ? "YOU WIN" :
+    score.player < score.bot ? "BOT WINS" :
+    "TIE";
+  const winnerColor =
+    score.player > score.bot ? PLAYER_COLORS[0] :
+    score.player < score.bot ? BOT_COLORS[0] :
+    "#aaa";
+
+  return (
+    <div style={modalStyles.backdrop}>
+      <div style={modalStyles.box}>
+        <div style={{ ...modalStyles.title, color: winnerColor }}>{winner}</div>
+        <div style={modalStyles.scoreRow}>
+          <div style={{ color: PLAYER_COLORS[0] }}>You: {score.player}</div>
+          <div style={{ color: "#666" }}>vs</div>
+          <div style={{ color: BOT_COLORS[0] }}>Bot: {score.bot}</div>
+        </div>
+        <table style={modalStyles.statsTable}>
+          <thead>
+            <tr>
+              <th style={modalStyles.statTh}></th>
+              <th style={{ ...modalStyles.statTh, color: PLAYER_COLORS[0] }}>You</th>
+              <th style={{ ...modalStyles.statTh, color: BOT_COLORS[0] }}>Bot</th>
+            </tr>
+          </thead>
+          <tbody>
+            <StatRow label="Paths built" p={stats.player.pathsBuilt} b={stats.bot.pathsBuilt} />
+            <StatRow label="Claims used" p={stats.player.claimsUsed} b={stats.bot.claimsUsed} />
+            <StatRow label="Seizes used" p={stats.player.seizesUsed} b={stats.bot.seizesUsed} />
+            <StatRow label="Treaties proposed" p={stats.player.treatiesProposed} b={stats.bot.treatiesProposed} />
+            <StatRow label="Treaties accepted" p={stats.player.treatiesAccepted} b={stats.bot.treatiesAccepted} />
+            <StatRow label="Treaties rejected" p={stats.player.treatiesRejected} b={stats.bot.treatiesRejected} />
+          </tbody>
+        </table>
+        <button style={modalStyles.restartBtn} onClick={onRestart}>Play Again</button>
+      </div>
+    </div>
+  );
+}
+
+function StatRow({ label, p, b }: { label: string; p: number; b: number }) {
+  return (
+    <tr>
+      <td style={modalStyles.statLabel}>{label}</td>
+      <td style={modalStyles.statCell}>{p}</td>
+      <td style={modalStyles.statCell}>{b}</td>
+    </tr>
+  );
+}
+
+const modalStyles: Record<string, React.CSSProperties> = {
+  backdrop: {
+    position: "fixed",
+    inset: 0,
+    background: "rgba(8,14,20,0.78)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 1000,
+  },
+  box: {
+    background: "#0f1923",
+    border: "1px solid #2a3a4a",
+    borderRadius: "8px",
+    padding: "28px 36px",
+    minWidth: "340px",
+    boxShadow: "0 12px 40px rgba(0,0,0,0.5)",
+    color: "#cdd5dd",
+    fontFamily: "system-ui",
+  },
+  title: {
+    fontSize: "26px",
+    fontWeight: 700,
+    textAlign: "center",
+    marginBottom: "12px",
+    letterSpacing: "1px",
+  },
+  scoreRow: {
+    display: "flex",
+    justifyContent: "space-around",
+    alignItems: "center",
+    fontSize: "20px",
+    fontWeight: 600,
+    marginBottom: "20px",
+  },
+  statsTable: {
+    width: "100%",
+    borderCollapse: "collapse",
+    marginBottom: "20px",
+    fontSize: "13px",
+  },
+  statTh: {
+    textAlign: "right",
+    padding: "4px 8px",
+    fontWeight: 600,
+    borderBottom: "1px solid #2a3a4a",
+  },
+  statLabel: {
+    padding: "4px 8px",
+    color: "#8899aa",
+  },
+  statCell: {
+    padding: "4px 8px",
+    textAlign: "right",
+    fontVariantNumeric: "tabular-nums",
+  },
+  restartBtn: {
+    width: "100%",
+    padding: "10px",
+    background: "#1b2838",
+    border: "1px solid #5b6fff",
+    color: "#cdd5dd",
+    borderRadius: "4px",
+    fontSize: "14px",
+    fontWeight: 600,
+    cursor: "pointer",
   },
 };
 

@@ -2,7 +2,7 @@ import { useState, useRef, useMemo, useCallback } from "react";
 import { Canvas } from "@react-three/fiber";
 import { OrthographicCamera } from "@react-three/drei";
 import { Leva, useControls } from "leva";
-import { GameGrid, GameOverlay, DEFAULT_CONFIG, type GameConfig, type DualScore, type DualTokens, type ClickMode, type TreatyResult } from "./Grid.tsx";
+import { GameGrid, GameOverlay, EndGameModal, DEFAULT_CONFIG, type GameConfig, type DualScore, type DualTokens, type ClickMode, type TreatyResult, type DualStats } from "./Grid.tsx";
 import { useAuth } from "./AuthContext.tsx";
 import { AuthScreen } from "./AuthScreen.tsx";
 import { apiPost } from "./api.ts";
@@ -21,6 +21,10 @@ export function App() {
   });
   const [mode, setMode] = useState<ClickMode>("build");
   const [treatyResult, setTreatyResult] = useState<TreatyResult>(null);
+  const [stats, setStats] = useState<DualStats>({
+    player: { claimsUsed: 0, seizesUsed: 0, treatiesAccepted: 0, treatiesProposed: 0, treatiesRejected: 0, pathsBuilt: 0 },
+    bot: { claimsUsed: 0, seizesUsed: 0, treatiesAccepted: 0, treatiesProposed: 0, treatiesRejected: 0, pathsBuilt: 0 },
+  });
   const clearRef = useRef<() => void>(() => {});
   const undoRef = useRef<() => void>(() => {});
   const setModeRef = useRef<(m: ClickMode) => void>(() => {});
@@ -141,6 +145,7 @@ export function App() {
             setTokens(state.tokens);
             setMode(state.mode);
             setTreatyResult(state.treatyResult);
+            setStats(state.stats);
             if (state.gameOver && !gameOver) {
               saveScore(state.score);
             }
@@ -149,6 +154,19 @@ export function App() {
         />
       </Canvas>
       {showLeaderboard && <Leaderboard onClose={() => setShowLeaderboard(false)} />}
+      {gameOver && (
+        <EndGameModal
+          score={score}
+          stats={stats}
+          onRestart={() => {
+            clearRef.current();
+            setScore({ player: 0, bot: 0 });
+            setGameOver(false);
+            gameStartRef.current = Date.now();
+            scoreSavedRef.current = false;
+          }}
+        />
+      )}
     </div>
   );
 }
