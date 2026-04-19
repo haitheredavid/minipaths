@@ -2,7 +2,7 @@ import { useState, useRef, useMemo, useCallback } from "react";
 import { Canvas } from "@react-three/fiber";
 import { OrthographicCamera } from "@react-three/drei";
 import { Leva, useControls } from "leva";
-import { GameGrid, GameOverlay, DEFAULT_CONFIG, type GameConfig } from "./Grid.tsx";
+import { GameGrid, GameOverlay, DEFAULT_CONFIG, type GameConfig, type DualScore, type DualTokens, type ClickMode, type TreatyResult } from "./Grid.tsx";
 import { useAuth } from "./AuthContext.tsx";
 import { AuthScreen } from "./AuthScreen.tsx";
 import { apiPost } from "./api.ts";
@@ -13,10 +13,17 @@ export function App() {
   const [showLeaderboard, setShowLeaderboard] = useState(false);
   const [pathCount, setPathCount] = useState(0);
   const [pending, setPending] = useState(false);
-  const [score, setScore] = useState(0);
+  const [score, setScore] = useState<DualScore>({ player: 0, bot: 0 });
   const [gameOver, setGameOver] = useState(false);
+  const [tokens, setTokens] = useState<DualTokens>({
+    player: { claim: 2, seize: 2 },
+    bot: { claim: 2, seize: 2 },
+  });
+  const [mode, setMode] = useState<ClickMode>("build");
+  const [treatyResult, setTreatyResult] = useState<TreatyResult>(null);
   const clearRef = useRef<() => void>(() => {});
   const undoRef = useRef<() => void>(() => {});
+  const setModeRef = useRef<(m: ClickMode) => void>(() => {});
   const gameStartRef = useRef<number>(Date.now());
   const scoreSavedRef = useRef(false);
 
@@ -28,21 +35,37 @@ export function App() {
     maxDemand: { value: DEFAULT_CONFIG.maxDemand, min: 3, max: 20, step: 1, label: "Max Demand" },
   });
 
+  const botControls = useControls("Bot", {
+    botEnabled: { value: DEFAULT_CONFIG.botEnabled, label: "Enabled" },
+    botDecisionInterval: { value: DEFAULT_CONFIG.botDecisionInterval, min: 0.5, max: 10, step: 0.5, label: "Decision Interval" },
+  });
+
+  const aggressionControls = useControls("Aggression", {
+    crossOwnerPlanningPenalty: { value: DEFAULT_CONFIG.crossOwnerPlanningPenalty, min: 0, max: 5, step: 0.1, label: "Planning Penalty" },
+    crossOwnerSpeedMult: { value: DEFAULT_CONFIG.crossOwnerSpeedMult, min: 0.1, max: 1, step: 0.05, label: "Cross-owner Speed" },
+    treatySpeedMult: { value: DEFAULT_CONFIG.treatySpeedMult, min: 1, max: 2, step: 0.05, label: "Treaty Bonus" },
+  });
+
   const config: GameConfig = useMemo(() => ({
     agentSpeed: controls.agentSpeed,
     spawnInterval: controls.spawnInterval,
     demandInterval: controls.demandInterval,
     newPairInterval: controls.newPairInterval,
     maxDemand: controls.maxDemand,
-  }), [controls.agentSpeed, controls.spawnInterval, controls.demandInterval, controls.newPairInterval, controls.maxDemand]);
+    botEnabled: botControls.botEnabled,
+    botDecisionInterval: botControls.botDecisionInterval,
+    crossOwnerPlanningPenalty: aggressionControls.crossOwnerPlanningPenalty,
+    crossOwnerSpeedMult: aggressionControls.crossOwnerSpeedMult,
+    treatySpeedMult: aggressionControls.treatySpeedMult,
+  }), [controls.agentSpeed, controls.spawnInterval, controls.demandInterval, controls.newPairInterval, controls.maxDemand, botControls.botEnabled, botControls.botDecisionInterval, aggressionControls.crossOwnerPlanningPenalty, aggressionControls.crossOwnerSpeedMult, aggressionControls.treatySpeedMult]);
 
-  const saveScore = useCallback(async (finalScore: number) => {
+  const saveScore = useCallback(async (finalScore: DualScore) => {
     if (scoreSavedRef.current) return;
     scoreSavedRef.current = true;
     const durationSeconds = Math.floor((Date.now() - gameStartRef.current) / 1000);
     try {
       await apiPost("/api/game/sessions", {
-        score: finalScore,
+        score: finalScore.player,
         durationSeconds,
         config,
       });
@@ -71,7 +94,7 @@ export function App() {
         pending={pending}
         onClear={() => {
           clearRef.current();
-          setScore(0);
+          setScore({ player: 0, bot: 0 });
           setGameOver(false);
           gameStartRef.current = Date.now();
           scoreSavedRef.current = false;
@@ -79,6 +102,10 @@ export function App() {
         onUndo={() => undoRef.current()}
         score={score}
         gameOver={gameOver}
+        tokens={tokens}
+        mode={mode}
+        onSetMode={(m) => setModeRef.current(m)}
+        treatyResult={treatyResult}
         username={user.username}
         onLogout={logout}
         onLeaderboard={() => setShowLeaderboard(true)}
@@ -104,16 +131,20 @@ export function App() {
         <directionalLight position={[-10, 12, -6]} intensity={0.25} color="#6a8abd" />
         <GameGrid
           config={config}
-          onStateChange={(count, isPending, clearFn, undoFn, newScore, isGameOver) => {
-            setPathCount(count);
-            setPending(isPending);
-            clearRef.current = clearFn;
-            undoRef.current = undoFn;
-            setScore(newScore);
-            if (isGameOver && !gameOver) {
-              saveScore(newScore);
+          onStateChange={(state, handlers) => {
+            setPathCount(state.pathCount);
+            setPending(state.pending);
+            clearRef.current = handlers.clear;
+            undoRef.current = handlers.undo;
+            setModeRef.current = handlers.setMode;
+            setScore(state.score);
+            setTokens(state.tokens);
+            setMode(state.mode);
+            setTreatyResult(state.treatyResult);
+            if (state.gameOver && !gameOver) {
+              saveScore(state.score);
             }
-            setGameOver(isGameOver);
+            setGameOver(state.gameOver);
           }}
         />
       </Canvas>

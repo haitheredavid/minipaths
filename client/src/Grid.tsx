@@ -8,16 +8,22 @@ const HALF = (GRID_SIZE * CELL_SIZE) / 2;
 
 // --- Interfaces ---
 
+export type OwnerId = 0 | 1;
+export const PLAYER: OwnerId = 0;
+export const BOT: OwnerId = 1;
+
 interface Path {
   id: string;
   points: [number, number][];
   color: string;
+  ownerId: OwnerId;
 }
 
 interface SpawnPoint {
   id: string;
   position: [number, number];
   color: string;
+  ownerId: OwnerId;
   spawnTimer: number;     // seconds until next agent spawn
   spawnInterval: number;  // seconds between spawns
 }
@@ -26,6 +32,7 @@ interface DestinationPoint {
   id: string;
   position: [number, number];
   color: string;
+  ownerId: OwnerId;       // matched-owner pair for Phase A
   demand: number;         // accumulated pins
   maxDemand: number;      // game over threshold
   demandTimer: number;    // seconds until next demand pin
@@ -39,13 +46,47 @@ interface Agent {
   speed: number;      // cells per second
   forward: boolean;   // travel direction along path
   color: string;
+  ownerId: OwnerId;
   spawnId: string;    // which spawn point created this agent
   destId: string;     // target destination
   returning: boolean; // heading back to spawn after delivery
 }
 
+export interface DualScore {
+  player: number;
+  bot: number;
+}
+
+export interface TokenState {
+  claim: number;
+  seize: number;
+}
+
+export interface DualTokens {
+  player: TokenState;
+  bot: TokenState;
+}
+
+export type ClickMode = "build" | "claim" | "seize" | "treaty";
+
+export type TreatyResult = "accepted" | "rejected" | null;
+
+const INITIAL_TOKENS: DualTokens = {
+  player: { claim: 2, seize: 2 },
+  bot: { claim: 2, seize: 2 },
+};
+
 const OBJECT_SCALE = 1.2;
-const POINT_COLORS = ["#8b7bff", "#2ee0b0", "#ff8a6b", "#4db5ff"];
+const PLAYER_COLORS = ["#8b7bff", "#4db5ff"]; // indigo, blue
+const BOT_COLORS = ["#2ee0b0", "#ff8a6b"];    // green, orange
+const COLORS_BY_OWNER: Record<OwnerId, string[]> = {
+  [PLAYER]: PLAYER_COLORS,
+  [BOT]: BOT_COLORS,
+};
+const ROAD_EDGE_BY_OWNER: Record<OwnerId, string> = {
+  [PLAYER]: "#5b6fff", // indigo edge for player roads
+  [BOT]: "#2ea876",    // green edge for bot roads
+};
 const PATH_COLOR = "#4a5260";
 const PATH_EDGE_COLOR = "#6d7684";
 const PATH_CENTER_COLOR = "#d8c26a";
@@ -65,12 +106,59 @@ function snapToGrid(x: number, z: number): [number, number] {
   ];
 }
 
+type TileOwners = Map<string, Set<OwnerId>>;
+
+function buildTileOwners(
+  paths: Path[],
+  seized?: Map<string, OwnerId>,
+  treatied?: Set<string>,
+): TileOwners {
+  const m: TileOwners = new Map();
+  for (const path of paths) {
+    for (const p of path.points) {
+      const k = posKey(p);
+      let s = m.get(k);
+      if (!s) { s = new Set<OwnerId>(); m.set(k, s); }
+      s.add(path.ownerId);
+    }
+  }
+  if (seized) {
+    for (const [k, owner] of seized) {
+      let s = m.get(k);
+      if (!s) { s = new Set<OwnerId>(); m.set(k, s); }
+      s.add(owner);
+    }
+  }
+  if (treatied) {
+    for (const k of treatied) {
+      let s = m.get(k);
+      if (!s) { s = new Set<OwnerId>(); m.set(k, s); }
+      s.add(PLAYER);
+      s.add(BOT);
+    }
+  }
+  return m;
+}
+
+/**
+ * A* with owner-aware costs.
+ * - hardBlockers: tiles never traversable except start/end (spawn/dest centers).
+ * - tileOwners: which owner(s) already have road on each tile.
+ *   - tile already owned by `ownerId` → forbidden (no overlap of own road) except start/end.
+ *   - tile owned only by opponents → traversable with `crossPenalty` added.
+ *   - empty tile → free.
+ */
 function findPath(
   start: [number, number],
   end: [number, number],
-  occupied: Set<string>
+  hardBlockers: Set<string>,
+  tileOwners: TileOwners,
+  ownerId: OwnerId,
+  crossPenalty: number,
 ): [number, number][] | null {
   const key = (p: [number, number]) => `${p[0]},${p[1]}`;
+  const startKey = key(start);
+  const endKey = key(end);
   const dirs: [number, number][] = [
     [CELL_SIZE, 0],
     [-CELL_SIZE, 0],
@@ -83,7 +171,7 @@ function findPath(
   ];
   const cameFrom = new Map<string, [number, number]>();
   const gScore = new Map<string, number>();
-  gScore.set(key(start), 0);
+  gScore.set(startKey, 0);
 
   while (open.length > 0) {
     open.sort((a, b) => a.f - b.f);
@@ -115,9 +203,19 @@ function findPath(
         next[1] > HALF - CELL_SIZE / 2
       ) continue;
 
-      if (occupied.has(nk) && nk !== key(start) && nk !== key(end)) continue;
+      const isEndpoint = nk === startKey || nk === endKey;
 
-      const tentG = current.g + CELL_SIZE;
+      if (hardBlockers.has(nk) && !isEndpoint) continue;
+
+      const owners = tileOwners.get(nk);
+      if (owners && owners.has(ownerId) && !isEndpoint) continue;
+
+      let edgeCost = CELL_SIZE;
+      if (owners && owners.size > 0 && !owners.has(ownerId) && !isEndpoint) {
+        edgeCost += crossPenalty;
+      }
+
+      const tentG = current.g + edgeCost;
       if (tentG < (gScore.get(nk) ?? Infinity)) {
         cameFrom.set(nk, current.pos);
         gScore.set(nk, tentG);
@@ -155,49 +253,64 @@ function randomGridPos(usedPositions: Set<string>): [number, number] {
   return pos;
 }
 
-/** Generate initial spawn/destination pairs with some distance between them */
-function generatePointPairs(count: number): { spawns: SpawnPoint[]; destinations: DestinationPoint[] } {
-  const used = new Set<string>();
-  const spawns: SpawnPoint[] = [];
-  const destinations: DestinationPoint[] = [];
+/** Generate a single spawn/dest pair for an owner, avoiding used positions */
+function generatePair(
+  ownerId: OwnerId,
+  colorIdx: number,
+  used: Set<string>,
+): { spawn: SpawnPoint; destination: DestinationPoint } {
+  const colors = COLORS_BY_OWNER[ownerId];
+  const color = colors[colorIdx % colors.length];
 
-  for (let i = 0; i < count; i++) {
-    const color = POINT_COLORS[i % POINT_COLORS.length];
+  let spawnPos: [number, number];
+  let destPos: [number, number];
+  let tries = 0;
 
-    // Place spawn point
-    let spawnPos: [number, number];
-    let destPos: [number, number];
-    let tries = 0;
+  do {
+    spawnPos = randomGridPos(used);
+    used.delete(posKey(spawnPos));
+    destPos = randomGridPos(used);
+    used.delete(posKey(destPos));
+    tries++;
+  } while (heuristic(spawnPos, destPos) < 6 && tries < 50);
 
-    do {
-      spawnPos = randomGridPos(used);
-      // Remove from used temporarily to allow distance check
-      used.delete(posKey(spawnPos));
-      destPos = randomGridPos(used);
-      used.delete(posKey(destPos));
-      tries++;
-    } while (heuristic(spawnPos, destPos) < 6 && tries < 50);
+  used.add(posKey(spawnPos));
+  used.add(posKey(destPos));
 
-    used.add(posKey(spawnPos));
-    used.add(posKey(destPos));
-
-    spawns.push({
+  return {
+    spawn: {
       id: crypto.randomUUID(),
       position: spawnPos,
       color,
+      ownerId,
       spawnTimer: INITIAL_SPAWN_INTERVAL,
       spawnInterval: INITIAL_SPAWN_INTERVAL,
-    });
-
-    destinations.push({
+    },
+    destination: {
       id: crypto.randomUUID(),
       position: destPos,
       color,
+      ownerId,
       demand: 1,
       maxDemand: 7,
       demandTimer: INITIAL_DEMAND_INTERVAL,
       demandInterval: INITIAL_DEMAND_INTERVAL,
-    });
+    },
+  };
+}
+
+/** Generate initial pairs for both owners */
+function generateInitialPairs(perOwner: number): { spawns: SpawnPoint[]; destinations: DestinationPoint[] } {
+  const used = new Set<string>();
+  const spawns: SpawnPoint[] = [];
+  const destinations: DestinationPoint[] = [];
+
+  for (const owner of [PLAYER, BOT] as OwnerId[]) {
+    for (let i = 0; i < perOwner; i++) {
+      const { spawn, destination } = generatePair(owner, i, used);
+      spawns.push(spawn);
+      destinations.push(destination);
+    }
   }
 
   return { spawns, destinations };
@@ -476,13 +589,37 @@ function DestinationPointMesh({ point, scale = 1 }: { point: DestinationPoint; s
 /** Agent mesh — small colored car box, offset to right lane of travel */
 const LANE_OFFSET = 0.13 * OBJECT_SCALE;
 
-function AgentMesh({ agent, path }: { agent: Agent; path: [number, number][] }) {
+function AgentMesh({
+  agent,
+  path,
+  tileOwners,
+  treatiedTiles,
+  speedMult,
+  treatyMult,
+}: {
+  agent: Agent;
+  path: [number, number][];
+  tileOwners: TileOwners;
+  treatiedTiles: Set<string>;
+  speedMult: number;
+  treatyMult: number;
+}) {
   const meshRef = useRef<THREE.Group>(null);
 
   useFrame((_, delta) => {
     if (!meshRef.current || path.length < 2) return;
 
-    const step = agent.speed * delta;
+    const idxNow = Math.max(0, Math.min(Math.floor(agent.progress), path.length - 1));
+    const tileKey = posKey(path[idxNow]);
+    const owners = tileOwners.get(tileKey);
+    let stepMult = 1;
+    if (treatiedTiles.has(tileKey)) {
+      stepMult = treatyMult; // both sides get bonus on treatied tiles
+    } else if (owners && owners.size > 0 && !owners.has(agent.ownerId)) {
+      stepMult = speedMult;  // crossing pure opponent tile
+    }
+
+    const step = agent.speed * stepMult * delta;
     if (agent.forward) {
       agent.progress += step;
       if (agent.progress >= path.length - 1) {
@@ -546,12 +683,40 @@ function AgentMesh({ agent, path }: { agent: Agent; path: [number, number][] }) 
   );
 }
 
-function HoverCell({ position, blocked = false }: { position: [number, number] | null; blocked?: boolean }) {
+function SeizedMarker({ position, color }: { position: [number, number]; color: string }) {
+  return (
+    <group position={[position[0], 0.07, position[1]]}>
+      <mesh rotation={[-Math.PI / 2, 0, Math.PI / 4]}>
+        <ringGeometry args={[0.18, 0.32, 4]} />
+        <meshBasicMaterial color={color} side={THREE.DoubleSide} transparent opacity={0.85} toneMapped={false} />
+      </mesh>
+    </group>
+  );
+}
+
+function TreatyMarker({ position }: { position: [number, number] }) {
+  // Two interlocked half-rings — player color + bot color
+  return (
+    <group position={[position[0], 0.075, position[1]]}>
+      <mesh rotation={[-Math.PI / 2, 0, 0]}>
+        <ringGeometry args={[0.22, 0.32, 24, 1, 0, Math.PI]} />
+        <meshBasicMaterial color={ROAD_EDGE_BY_OWNER[PLAYER]} side={THREE.DoubleSide} transparent opacity={0.9} toneMapped={false} />
+      </mesh>
+      <mesh rotation={[-Math.PI / 2, 0, Math.PI]}>
+        <ringGeometry args={[0.22, 0.32, 24, 1, 0, Math.PI]} />
+        <meshBasicMaterial color={ROAD_EDGE_BY_OWNER[BOT]} side={THREE.DoubleSide} transparent opacity={0.9} toneMapped={false} />
+      </mesh>
+    </group>
+  );
+}
+
+function HoverCell({ position, blocked = false, tint }: { position: [number, number] | null; blocked?: boolean; tint?: string }) {
   if (!position) return null;
+  const color = tint ?? (blocked ? "#ff5566" : "#5eb2ff");
   return (
     <mesh position={[position[0], 0.02, position[1]]} rotation={[-Math.PI / 2, 0, 0]}>
       <planeGeometry args={[CELL_SIZE * 0.9, CELL_SIZE * 0.9]} />
-      <meshBasicMaterial color={blocked ? "#ff5566" : "#5eb2ff"} transparent opacity={blocked ? 0.55 : 0.4} side={THREE.DoubleSide} />
+      <meshBasicMaterial color={color} transparent opacity={blocked ? 0.55 : 0.4} side={THREE.DoubleSide} />
     </mesh>
   );
 }
@@ -565,24 +730,25 @@ function findPointAtPos<T extends { position: [number, number] }>(
   return points.find((p) => posEqual(p.position, pos));
 }
 
-/** Find a path that connects a spawn to a matching destination */
+/** Find a path that connects a spawn to a matching destination (same owner + color) */
 function findConnectingPath(
   spawn: SpawnPoint,
   destinations: DestinationPoint[],
   paths: Path[]
 ): { path: Path; dest: DestinationPoint; spawnAtStart: boolean } | null {
-  const matchingDests = destinations.filter((d) => d.color === spawn.color);
+  const matchingDests = destinations.filter(
+    (d) => d.color === spawn.color && d.ownerId === spawn.ownerId,
+  );
+  const ownerPaths = paths.filter((p) => p.ownerId === spawn.ownerId);
 
-  for (const path of paths) {
+  for (const path of ownerPaths) {
     const start = path.points[0];
     const end = path.points[path.points.length - 1];
 
     for (const dest of matchingDests) {
-      // spawn at start, dest at end
       if (posEqual(start, spawn.position) && posEqual(end, dest.position)) {
         return { path, dest, spawnAtStart: true };
       }
-      // spawn at end, dest at start
       if (posEqual(end, spawn.position) && posEqual(start, dest.position)) {
         return { path, dest, spawnAtStart: false };
       }
@@ -590,6 +756,148 @@ function findConnectingPath(
   }
 
   return null;
+}
+
+// --- Bot AI ---
+
+/**
+ * Greedy: for each unconnected bot spawn, A* to closest matching dest.
+ * Returns new paths to append. Mutates a local occupied set across iterations
+ * so multiple new bot paths in the same tick don't collide.
+ */
+function botGreedyConnect(
+  spawns: SpawnPoint[],
+  dests: DestinationPoint[],
+  paths: Path[],
+  pointPositions: Set<string>,
+  crossPenalty: number,
+): Path[] {
+  const newPaths: Path[] = [];
+  let tileOwners = buildTileOwners(paths);
+
+  for (const spawn of spawns) {
+    if (spawn.ownerId !== BOT) continue;
+
+    const conn = findConnectingPath(spawn, dests, [...paths, ...newPaths]);
+    if (conn) continue;
+
+    const matchingDests = dests
+      .filter((d) => d.color === spawn.color && d.ownerId === BOT)
+      .sort((a, b) => heuristic(spawn.position, a.position) - heuristic(spawn.position, b.position));
+
+    for (const dest of matchingDests) {
+      const path = findPath(spawn.position, dest.position, pointPositions, tileOwners, BOT, crossPenalty);
+      if (!path) continue;
+
+      const newPath: Path = {
+        id: crypto.randomUUID(),
+        points: path,
+        color: PATH_COLOR,
+        ownerId: BOT,
+      };
+      newPaths.push(newPath);
+      tileOwners = buildTileOwners([...paths, ...newPaths]);
+      break;
+    }
+  }
+
+  return newPaths;
+}
+
+/**
+ * Bot heuristic for token use. Fires at most one action per tick.
+ * Claim: pick a player spawn near a player dest of high demand.
+ * Seize: pick a player road tile that lies on bot's likely future path
+ *        (closest player tile to any bot spawn-dest line).
+ */
+function botUseTokens(args: {
+  tokens: DualTokens;
+  spawnPoints: SpawnPoint[];
+  destPoints: DestinationPoint[];
+  paths: Path[];
+  seizedTiles: Map<string, OwnerId>;
+  onClaim: (spawnId: string) => void;
+  onSeize: (tileKey: string) => void;
+}) {
+  const { tokens, spawnPoints, destPoints, paths, seizedTiles, onClaim, onSeize } = args;
+
+  // CLAIM heuristic — fire when player has >=3 spawns and bot has claim tokens
+  const playerSpawns = spawnPoints.filter((s) => s.ownerId === PLAYER);
+  if (tokens.bot.claim > 0 && playerSpawns.length >= 3) {
+    // Target the player spawn whose matching dest has highest demand
+    let target: SpawnPoint | null = null;
+    let bestDemand = -1;
+    for (const sp of playerSpawns) {
+      const dest = destPoints.find((d) => d.color === sp.color && d.ownerId === PLAYER);
+      if (!dest) continue;
+      if (dest.demand > bestDemand) {
+        bestDemand = dest.demand;
+        target = sp;
+      }
+    }
+    if (target && bestDemand >= 2) {
+      onClaim(target.id);
+      return;
+    }
+  }
+
+  // SEIZE heuristic — fire when bot has seize tokens and there's a player road tile
+  // that's blocking a bot spawn-dest manhattan corridor
+  if (tokens.bot.seize > 0) {
+    const playerTiles: string[] = [];
+    for (const path of paths) {
+      if (path.ownerId !== PLAYER) continue;
+      for (const p of path.points) {
+        const k = posKey(p);
+        if (seizedTiles.has(k)) continue;
+        playerTiles.push(k);
+      }
+    }
+    if (playerTiles.length === 0) return;
+
+    // Pick player tile closest to any bot spawn (proxy for "in our way")
+    const botSpawns = spawnPoints.filter((s) => s.ownerId === BOT);
+    if (botSpawns.length === 0) return;
+
+    let bestKey: string | null = null;
+    let bestDist = Infinity;
+    for (const tk of playerTiles) {
+      const [x, z] = tk.split(",").map(Number) as [number, number];
+      for (const sp of botSpawns) {
+        const d = heuristic([x, z], sp.position);
+        if (d < bestDist) { bestDist = d; bestKey = tk; }
+      }
+    }
+    if (bestKey && bestDist <= 5) {
+      onSeize(bestKey);
+      return;
+    }
+  }
+}
+
+/**
+ * Bot evaluates a treaty proposal on `targetPath`.
+ * Accepts iff bot has any spawn or destination within `radius` manhattan
+ * units of any tile in the path (means bot would actually use it).
+ */
+function botEvaluateTreaty(
+  targetPath: Path,
+  spawnPoints: SpawnPoint[],
+  destPoints: DestinationPoint[],
+  radius = 4,
+): boolean {
+  const botPoints: [number, number][] = [
+    ...spawnPoints.filter((s) => s.ownerId === BOT).map((s) => s.position),
+    ...destPoints.filter((d) => d.ownerId === BOT).map((d) => d.position),
+  ];
+  if (botPoints.length === 0) return false;
+
+  for (const tile of targetPath.points) {
+    for (const bp of botPoints) {
+      if (heuristic(tile, bp) <= radius) return true;
+    }
+  }
+  return false;
 }
 
 // --- Config ---
@@ -600,6 +908,11 @@ export interface GameConfig {
   demandInterval: number;
   newPairInterval: number;
   maxDemand: number;
+  botEnabled: boolean;
+  botDecisionInterval: number;
+  crossOwnerPlanningPenalty: number;
+  crossOwnerSpeedMult: number;
+  treatySpeedMult: number;
 }
 
 export const DEFAULT_CONFIG: GameConfig = {
@@ -608,20 +921,34 @@ export const DEFAULT_CONFIG: GameConfig = {
   demandInterval: INITIAL_DEMAND_INTERVAL,
   newPairInterval: NEW_PAIR_INTERVAL,
   maxDemand: 7,
+  botEnabled: true,
+  botDecisionInterval: 2.5,
+  crossOwnerPlanningPenalty: 0.5,
+  crossOwnerSpeedMult: 0.7,
+  treatySpeedMult: 1.15,
 };
 
 // --- Main Game Component ---
 
+export interface GameUiState {
+  pathCount: number;
+  pending: boolean;
+  score: DualScore;
+  gameOver: boolean;
+  tokens: DualTokens;
+  mode: ClickMode;
+  treatyResult: TreatyResult;
+}
+
+export interface GameHandlers {
+  clear: () => void;
+  undo: () => void;
+  setMode: (m: ClickMode) => void;
+}
+
 interface GameGridProps {
   config: GameConfig;
-  onStateChange: (
-    pathCount: number,
-    pending: boolean,
-    clearFn: () => void,
-    undoFn: () => void,
-    score: number,
-    gameOver: boolean,
-  ) => void;
+  onStateChange: (state: GameUiState, handlers: GameHandlers) => void;
 }
 
 export function GameGrid({ config, onStateChange }: GameGridProps) {
@@ -630,9 +957,19 @@ export function GameGrid({ config, onStateChange }: GameGridProps) {
   const [hover, setHover] = useState<[number, number] | null>(null);
   const planeRef = useRef<THREE.Mesh>(null);
   const agentsRef = useRef<Agent[]>([]);
-  const scoreRef = useRef(0);
+  const scoreRef = useRef<DualScore>({ player: 0, bot: 0 });
   const gameOverRef = useRef(false);
   const newPairTimerRef = useRef(NEW_PAIR_INTERVAL);
+  const botTimerRef = useRef(2);
+  const [seizedTiles, setSeizedTiles] = useState<Map<string, OwnerId>>(new Map());
+  const [treatiedTiles, setTreatiedTiles] = useState<Set<string>>(new Set());
+  const [tokens, setTokens] = useState<DualTokens>(() => ({
+    player: { ...INITIAL_TOKENS.player },
+    bot: { ...INITIAL_TOKENS.bot },
+  }));
+  const [mode, setMode] = useState<ClickMode>("build");
+  const [treatyResult, setTreatyResult] = useState<TreatyResult>(null);
+  const treatyResultTimerRef = useRef<number | null>(null);
 
   // --- Intro animation state ---
   const [introPhase, setIntroPhase] = useState<IntroPhase>("grid");
@@ -645,9 +982,9 @@ export function GameGrid({ config, onStateChange }: GameGridProps) {
   const [spawnPoints, setSpawnPoints] = useState<SpawnPoint[]>([]);
   const [destPoints, setDestPoints] = useState<DestinationPoint[]>([]);
 
-  // Initialize points on first render
+  // Initialize points on first render — 2 pairs per owner (4 total)
   useEffect(() => {
-    const { spawns, destinations } = generatePointPairs(3);
+    const { spawns, destinations } = generateInitialPairs(2);
     setSpawnPoints(spawns);
     setDestPoints(destinations);
   }, []);
@@ -660,32 +997,24 @@ export function GameGrid({ config, onStateChange }: GameGridProps) {
     return set;
   }, [spawnPoints, destPoints]);
 
-  const occupied = useMemo(() => {
-    const set = new Set<string>();
-    for (const path of paths) {
-      for (const p of path.points) {
-        set.add(posKey(p));
-      }
-    }
-    return set;
-  }, [paths]);
-
-  // For pathfinding, roads can't overlap but CAN start/end on spawn/dest points
-  const pathfindingOccupied = useMemo(() => {
-    const set = new Set(occupied);
-    // Block spawn/dest positions so paths can't route through them
-    // (findPath already allows start/end on occupied cells)
-    for (const key of pointPositions) set.add(key);
-    return set;
-  }, [occupied, pointPositions]);
+  const tileOwners = useMemo(() => buildTileOwners(paths, seizedTiles, treatiedTiles), [paths, seizedTiles, treatiedTiles]);
 
   const handleClear = useCallback(() => {
     setPaths([]);
     setPendingStart(null);
     agentsRef.current = [];
-    scoreRef.current = 0;
+    scoreRef.current = { player: 0, bot: 0 };
     gameOverRef.current = false;
     newPairTimerRef.current = NEW_PAIR_INTERVAL;
+    botTimerRef.current = 2;
+    setSeizedTiles(new Map());
+    setTreatiedTiles(new Set());
+    setTokens({
+      player: { ...INITIAL_TOKENS.player },
+      bot: { ...INITIAL_TOKENS.bot },
+    });
+    setMode("build");
+    setTreatyResult(null);
     // Reset intro animation
     setIntroPhase("grid");
     introTimerRef.current = 0;
@@ -693,25 +1022,47 @@ export function GameGrid({ config, onStateChange }: GameGridProps) {
     setSpawnScales([]);
     setDestScales([]);
     // Re-generate points
-    const { spawns, destinations } = generatePointPairs(3);
+    const { spawns, destinations } = generateInitialPairs(2);
     setSpawnPoints(spawns);
     setDestPoints(destinations);
   }, []);
 
   const handleUndo = useCallback(() => {
     setPaths((prev) => {
-      const next = prev.slice(0, -1);
-      agentsRef.current = agentsRef.current.filter(
-        (a) => next.some((p) => p.id === a.pathId)
-      );
-      return next;
+      // Walk backwards, skip locked paths (any tile in seizedTiles or treatiedTiles)
+      for (let i = prev.length - 1; i >= 0; i--) {
+        const p = prev[i];
+        if (p.ownerId !== PLAYER) continue;
+        const locked = p.points.some((pt) => {
+          const k = posKey(pt);
+          return seizedTiles.has(k) || treatiedTiles.has(k);
+        });
+        if (locked) continue;
+        const next = [...prev.slice(0, i), ...prev.slice(i + 1)];
+        agentsRef.current = agentsRef.current.filter(
+          (a) => next.some((q) => q.id === a.pathId)
+        );
+        return next;
+      }
+      return prev;
     });
-  }, []);
+  }, [seizedTiles, treatiedTiles]);
 
   // Sync state up to parent
   useEffect(() => {
-    onStateChange(paths.length, !!pendingStart, handleClear, handleUndo, scoreRef.current, gameOverRef.current);
-  }, [paths.length, pendingStart, onStateChange, handleClear, handleUndo]);
+    onStateChange(
+      {
+        pathCount: paths.length,
+        pending: !!pendingStart,
+        score: { ...scoreRef.current },
+        gameOver: gameOverRef.current,
+        tokens,
+        mode,
+        treatyResult,
+      },
+      { clear: handleClear, undo: handleUndo, setMode },
+    );
+  }, [paths.length, pendingStart, onStateChange, handleClear, handleUndo, tokens, mode, treatyResult]);
 
   // --- Intro animation tick ---
   useFrame((_, delta) => {
@@ -771,13 +1122,24 @@ export function GameGrid({ config, onStateChange }: GameGridProps) {
 
         if (dest.demand >= dest.maxDemand) {
           gameOverRef.current = true;
-          onStateChange(paths.length, !!pendingStart, handleClear, handleUndo, scoreRef.current, true);
+          onStateChange(
+            {
+              pathCount: paths.length,
+              pending: !!pendingStart,
+              score: { ...scoreRef.current },
+              gameOver: true,
+              tokens,
+              mode,
+              treatyResult,
+            },
+            { clear: handleClear, undo: handleUndo, setMode },
+          );
           return;
         }
       }
     }
 
-    // Periodically add new spawn/dest pair to increase difficulty
+    // Periodically add new spawn/dest pair to increase difficulty — alternate owners
     newPairTimerRef.current -= delta;
     if (newPairTimerRef.current <= 0) {
       newPairTimerRef.current = config.newPairInterval;
@@ -787,37 +1149,18 @@ export function GameGrid({ config, onStateChange }: GameGridProps) {
       for (const path of paths) {
         for (const p of path.points) used.add(posKey(p));
       }
-      const colorIdx = spawnPoints.length % POINT_COLORS.length;
-      const color = POINT_COLORS[colorIdx];
-      let spawnPos: [number, number];
-      let destPos: [number, number];
-      let tries = 0;
-      do {
-        spawnPos = randomGridPos(used);
-        used.delete(posKey(spawnPos));
-        destPos = randomGridPos(used);
-        used.delete(posKey(destPos));
-        tries++;
-      } while (heuristic(spawnPos, destPos) < 6 && tries < 50);
-      used.add(posKey(spawnPos));
-      used.add(posKey(destPos));
+      const owner: OwnerId = (spawnPoints.length % 2) as OwnerId;
+      const colorIdx = Math.floor(spawnPoints.length / 2);
+      const { spawn, destination } = generatePair(owner, colorIdx, used);
+      // Apply runtime config intervals
+      spawn.spawnTimer = config.spawnInterval;
+      spawn.spawnInterval = config.spawnInterval;
+      destination.maxDemand = config.maxDemand;
+      destination.demandTimer = config.demandInterval;
+      destination.demandInterval = config.demandInterval;
 
-      setSpawnPoints((prev) => [...prev, {
-        id: crypto.randomUUID(),
-        position: spawnPos,
-        color,
-        spawnTimer: config.spawnInterval,
-        spawnInterval: config.spawnInterval,
-      }]);
-      setDestPoints((prev) => [...prev, {
-        id: crypto.randomUUID(),
-        position: destPos,
-        color,
-        demand: 1,
-        maxDemand: config.maxDemand,
-        demandTimer: config.demandInterval,
-        demandInterval: config.demandInterval,
-      }]);
+      setSpawnPoints((prev) => [...prev, spawn]);
+      setDestPoints((prev) => [...prev, destination]);
     }
 
     // Spawn agents from spawn points that have connected paths
@@ -839,6 +1182,7 @@ export function GameGrid({ config, onStateChange }: GameGridProps) {
           speed: config.agentSpeed,
           forward: connection.spawnAtStart,
           color: spawn.color,
+          ownerId: spawn.ownerId,
           spawnId: spawn.id,
           destId: connection.dest.id,
           returning: false,
@@ -859,12 +1203,24 @@ export function GameGrid({ config, onStateChange }: GameGridProps) {
           : agent.progress <= 0.05;
 
         if (atEnd) {
-          // Arrived at destination — reduce demand, score point
+          // Arrived at destination — reduce demand, score point for agent's owner
           const dest = destPoints.find((d) => d.id === agent.destId);
           if (dest && dest.demand > 0) {
             dest.demand -= 1;
-            scoreRef.current += 1;
-            onStateChange(paths.length, !!pendingStart, handleClear, handleUndo, scoreRef.current, false);
+            if (agent.ownerId === PLAYER) scoreRef.current.player += 1;
+            else scoreRef.current.bot += 1;
+            onStateChange(
+              {
+                pathCount: paths.length,
+                pending: !!pendingStart,
+                score: { ...scoreRef.current },
+                gameOver: false,
+                tokens,
+                mode,
+                treatyResult,
+              },
+              { clear: handleClear, undo: handleUndo, setMode },
+            );
           }
           // Start returning
           agent.returning = true;
@@ -887,15 +1243,53 @@ export function GameGrid({ config, onStateChange }: GameGridProps) {
     }
   });
 
+  // --- Bot decision tick ---
+  useFrame((_, delta) => {
+    if (introPhase !== "done" || gameOverRef.current) return;
+    if (!config.botEnabled) return;
+
+    botTimerRef.current -= delta;
+    if (botTimerRef.current > 0) return;
+    botTimerRef.current = config.botDecisionInterval;
+
+    const newRoads = botGreedyConnect(spawnPoints, destPoints, paths, pointPositions, config.crossOwnerPlanningPenalty);
+    if (newRoads.length > 0) {
+      setPaths((prev) => [...prev, ...newRoads]);
+    }
+
+    // Bot token use — fires once per decision tick if heuristic matches
+    botUseTokens({
+      tokens,
+      spawnPoints,
+      destPoints,
+      paths,
+      seizedTiles,
+      onClaim: (spawnId) => {
+        setSpawnPoints((prev) => prev.filter((s) => s.id !== spawnId));
+        agentsRef.current = agentsRef.current.filter((a) => a.spawnId !== spawnId);
+        setTokens((t) => ({ ...t, bot: { ...t.bot, claim: t.bot.claim - 1 } }));
+      },
+      onSeize: (tileKey) => {
+        setSeizedTiles((prev) => {
+          const next = new Map(prev);
+          next.set(tileKey, BOT);
+          return next;
+        });
+        setTokens((t) => ({ ...t, bot: { ...t.bot, seize: t.bot.seize - 1 } }));
+      },
+    });
+  });
+
   const previewResult = useMemo(() => {
     if (!pendingStart || !hover) return null;
     if (pendingStart[0] === hover[0] && pendingStart[1] === hover[1]) return null;
-    // Allow ending on spawn/dest positions
-    const isEndOnPoint = pointPositions.has(posKey(hover));
-    if (occupied.has(posKey(hover)) && !isEndOnPoint) return { path: null, blocked: true };
-    const path = findPath(pendingStart, hover, pathfindingOccupied);
+    const hoverKey = posKey(hover);
+    const isEndOnPoint = pointPositions.has(hoverKey);
+    // Block endpoint on any existing road tile
+    if (tileOwners.has(hoverKey) && !isEndOnPoint) return { path: null, blocked: true };
+    const path = findPath(pendingStart, hover, pointPositions, tileOwners, PLAYER, config.crossOwnerPlanningPenalty);
     return { path, blocked: path === null };
-  }, [pendingStart, hover, occupied, pathfindingOccupied, pointPositions]);
+  }, [pendingStart, hover, tileOwners, pointPositions, config.crossOwnerPlanningPenalty]);
 
   const previewColor = previewResult?.blocked
     ? "#ff0000"
@@ -916,9 +1310,69 @@ export function GameGrid({ config, onStateChange }: GameGridProps) {
       const cellKey = posKey(snapped);
       const isOnPoint = pointPositions.has(cellKey);
 
+      // --- CLAIM mode: target opp spawn, remove it ---
+      if (mode === "claim") {
+        if (tokens.player.claim <= 0) { setMode("build"); return; }
+        const target = spawnPoints.find(
+          (s) => posEqual(s.position, snapped) && s.ownerId !== PLAYER,
+        );
+        if (!target) return;
+        setSpawnPoints((prev) => prev.filter((s) => s.id !== target.id));
+        // Remove agents from that spawn
+        agentsRef.current = agentsRef.current.filter((a) => a.spawnId !== target.id);
+        setTokens((t) => ({ ...t, player: { ...t.player, claim: t.player.claim - 1 } }));
+        setMode("build");
+        return;
+      }
+
+      // --- TREATY mode: propose mutual sharing on a path ---
+      if (mode === "treaty") {
+        const targetPath = paths.find((p) => p.points.some((pt) => posEqual(pt, snapped)));
+        if (!targetPath) return;
+        // Skip already fully-treatied paths
+        const allAlready = targetPath.points.every((pt) => treatiedTiles.has(posKey(pt)));
+        if (allAlready) return;
+
+        const accepted = botEvaluateTreaty(targetPath, spawnPoints, destPoints);
+        if (accepted) {
+          setTreatiedTiles((prev) => {
+            const next = new Set(prev);
+            for (const pt of targetPath.points) next.add(posKey(pt));
+            return next;
+          });
+        }
+        setTreatyResult(accepted ? "accepted" : "rejected");
+        if (treatyResultTimerRef.current !== null) {
+          clearTimeout(treatyResultTimerRef.current);
+        }
+        treatyResultTimerRef.current = window.setTimeout(() => {
+          setTreatyResult(null);
+          treatyResultTimerRef.current = null;
+        }, 2200);
+        setMode("build");
+        return;
+      }
+
+      // --- SEIZE mode: target opp road tile, lock + co-own ---
+      if (mode === "seize") {
+        if (tokens.player.seize <= 0) { setMode("build"); return; }
+        const owners = tileOwners.get(cellKey);
+        // Must be a tile owned only by opponent (not already shared, not your own)
+        if (!owners || owners.has(PLAYER) || owners.size === 0) return;
+        if (seizedTiles.has(cellKey)) return;
+        setSeizedTiles((prev) => {
+          const next = new Map(prev);
+          next.set(cellKey, PLAYER);
+          return next;
+        });
+        setTokens((t) => ({ ...t, player: { ...t.player, seize: t.player.seize - 1 } }));
+        setMode("build");
+        return;
+      }
+
+      // --- BUILD mode (default) ---
       if (!pendingStart) {
-        // Can start on a spawn/dest point OR empty cell
-        if (occupied.has(cellKey) && !isOnPoint) return;
+        if (tileOwners.has(cellKey) && !isOnPoint) return;
         setPendingStart(snapped);
       } else {
         if (snapped[0] === pendingStart[0] && snapped[1] === pendingStart[1]) {
@@ -926,21 +1380,21 @@ export function GameGrid({ config, onStateChange }: GameGridProps) {
           return;
         }
 
-        if (occupied.has(cellKey) && !isOnPoint) return;
+        if (tileOwners.has(cellKey) && !isOnPoint) return;
 
-        const pathPoints = findPath(pendingStart, snapped, pathfindingOccupied);
+        const pathPoints = findPath(pendingStart, snapped, pointPositions, tileOwners, PLAYER, config.crossOwnerPlanningPenalty);
         if (!pathPoints) return;
 
         const color = PATH_COLOR;
         const pathId = crypto.randomUUID();
         setPaths((prev) => [
           ...prev,
-          { id: pathId, points: pathPoints, color },
+          { id: pathId, points: pathPoints, color, ownerId: PLAYER },
         ]);
         setPendingStart(null);
       }
     },
-    [pendingStart, occupied, paths.length, pointPositions, pathfindingOccupied, introPhase]
+    [pendingStart, paths, pointPositions, tileOwners, introPhase, config.crossOwnerPlanningPenalty, mode, tokens.player.claim, tokens.player.seize, spawnPoints, destPoints, seizedTiles, treatiedTiles]
   );
 
   return (
@@ -961,7 +1415,17 @@ export function GameGrid({ config, onStateChange }: GameGridProps) {
       <GridLines progress={gridProgress} />
 
       {/* Hover indicator */}
-      {introPhase === "done" && <HoverCell position={hover} />}
+      {introPhase === "done" && (
+        <HoverCell
+          position={hover}
+          tint={
+            mode === "claim" ? "#ff8a3c" :
+            mode === "seize" ? "#a86bff" :
+            mode === "treaty" ? "#5be0a6" :
+            undefined
+          }
+        />
+      )}
 
       {/* Pending start marker */}
       {pendingStart && <Marker position={pendingStart} color="#ff6b9d" />}
@@ -985,17 +1449,27 @@ export function GameGrid({ config, onStateChange }: GameGridProps) {
       {/* Paths */}
       {paths.map((p) => (
         <group key={p.id}>
-          <PathLine path={p.points} color={p.color} />
-          <Marker position={p.points[0]} color={p.color} />
-          <Marker position={p.points[p.points.length - 1]} color={p.color} />
+          <PathLine path={p.points} color={p.color} edgeColor={ROAD_EDGE_BY_OWNER[p.ownerId]} />
         </group>
       ))}
+
+      {/* Seized tile markers */}
+      {Array.from(seizedTiles.entries()).map(([k, seizer]) => {
+        const [x, z] = k.split(",").map(Number) as [number, number];
+        return <SeizedMarker key={k} position={[x, z]} color={seizer === PLAYER ? "#a86bff" : "#ff8a3c"} />;
+      })}
+
+      {/* Treaty tile markers */}
+      {Array.from(treatiedTiles).map((k) => {
+        const [x, z] = k.split(",").map(Number) as [number, number];
+        return <TreatyMarker key={`t-${k}`} position={[x, z]} />;
+      })}
 
       {/* Traveling agents */}
       {agentsRef.current.map((agent) => {
         const path = paths.find((p) => p.id === agent.pathId);
         if (!path || path.points.length < 2) return null;
-        return <AgentMesh key={agent.id} agent={agent} path={path.points} />;
+        return <AgentMesh key={agent.id} agent={agent} path={path.points} tileOwners={tileOwners} treatiedTiles={treatiedTiles} speedMult={config.crossOwnerSpeedMult} treatyMult={config.treatySpeedMult} />;
       })}
     </>
   );
@@ -1010,6 +1484,10 @@ export function GameOverlay({
   onUndo,
   score,
   gameOver,
+  tokens,
+  mode,
+  onSetMode,
+  treatyResult,
   username,
   onLogout,
   onLeaderboard,
@@ -1018,12 +1496,25 @@ export function GameOverlay({
   pending: boolean;
   onClear: () => void;
   onUndo: () => void;
-  score: number;
+  score: DualScore;
   gameOver: boolean;
+  tokens: DualTokens;
+  mode: ClickMode;
+  onSetMode: (m: ClickMode) => void;
+  treatyResult: TreatyResult;
   username?: string;
   onLogout?: () => void;
   onLeaderboard?: () => void;
 }) {
+  const winner =
+    score.player > score.bot ? "YOU WIN" :
+    score.player < score.bot ? "BOT WINS" :
+    "TIE";
+  const modeHint =
+    mode === "claim" ? "CLAIM mode — click opponent spawn" :
+    mode === "seize" ? "SEIZE mode — click opponent road tile" :
+    mode === "treaty" ? "TREATY mode — click any road tile to propose" :
+    pending ? "Click to set endpoint" : "Click to set start point";
   return (
     <div style={overlayStyles.container}>
       <div style={overlayStyles.info}>
@@ -1032,17 +1523,53 @@ export function GameOverlay({
         )}
         {gameOver ? (
           <span style={{ color: "#ff4444", fontWeight: "bold" }}>
-            GAME OVER — Score: {score}
+            GAME OVER — {winner} · You {score.player} · Bot {score.bot}
           </span>
         ) : (
           <>
-            {pending ? "Click to set endpoint" : "Click to set start point"}
+            {modeHint}
             {" | "}Paths: {pathCount}
-            {" | "}Score: {score}
+            {" | "}
+            <span style={{ color: PLAYER_COLORS[0] }}>You {score.player}</span>
+            {" · "}
+            <span style={{ color: BOT_COLORS[0] }}>Bot {score.bot}</span>
+            {" | "}
+            <span style={{ color: "#aaa" }}>
+              Claim {tokens.player.claim} · Seize {tokens.player.seize}
+            </span>
+            {treatyResult && (
+              <>
+                {" | "}
+                <span style={{ color: treatyResult === "accepted" ? "#5be0a6" : "#ff8a8a", fontWeight: "bold" }}>
+                  {treatyResult === "accepted" ? "TREATY ACCEPTED" : "TREATY REJECTED"}
+                </span>
+              </>
+            )}
           </>
         )}
       </div>
       <div style={overlayStyles.buttons}>
+        <button
+          style={modeBtnStyle(mode === "claim", "#ff8a3c")}
+          disabled={tokens.player.claim === 0 || gameOver}
+          onClick={() => onSetMode(mode === "claim" ? "build" : "claim")}
+        >
+          Claim ({tokens.player.claim})
+        </button>
+        <button
+          style={modeBtnStyle(mode === "seize", "#a86bff")}
+          disabled={tokens.player.seize === 0 || gameOver}
+          onClick={() => onSetMode(mode === "seize" ? "build" : "seize")}
+        >
+          Seize ({tokens.player.seize})
+        </button>
+        <button
+          style={modeBtnStyle(mode === "treaty", "#5be0a6")}
+          disabled={gameOver}
+          onClick={() => onSetMode(mode === "treaty" ? "build" : "treaty")}
+        >
+          Treaty
+        </button>
         <button style={overlayStyles.btn} onClick={onUndo} disabled={pathCount === 0}>
           Undo
         </button>
@@ -1091,3 +1618,13 @@ const overlayStyles: Record<string, React.CSSProperties> = {
     fontSize: "13px",
   },
 };
+
+function modeBtnStyle(active: boolean, accent: string): React.CSSProperties {
+  return {
+    ...overlayStyles.btn,
+    background: active ? accent : "#1b2838",
+    color: active ? "#0f1923" : "#8899aa",
+    border: `1px solid ${active ? accent : "#2a3a4a"}`,
+    fontWeight: active ? "bold" : "normal",
+  };
+}
