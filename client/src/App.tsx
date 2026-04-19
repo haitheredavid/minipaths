@@ -1,7 +1,7 @@
 import { useState, useRef, useMemo, useCallback } from "react";
 import { Canvas } from "@react-three/fiber";
 import { OrthographicCamera } from "@react-three/drei";
-import { GameGrid, GameOverlay, DEFAULT_CONFIG, type GameConfig } from "./Grid.tsx";
+import { GameGrid, GameOverlay, EndGameModal, DEFAULT_CONFIG, type GameConfig, type DualScore, type DualTokens, type ClickMode, type TreatyResult, type DualStats } from "./Grid.tsx";
 import { useAuth } from "./AuthContext.tsx";
 import { AuthScreen } from "./AuthScreen.tsx";
 import { apiPost } from "./api.ts";
@@ -14,22 +14,33 @@ export function App() {
   const [showLeaderboard, setShowLeaderboard] = useState(false);
   const [pathCount, setPathCount] = useState(0);
   const [pending, setPending] = useState(false);
-  const [score, setScore] = useState(0);
+  const [score, setScore] = useState<DualScore>({ player: 0, bot: 0 });
   const [gameOver, setGameOver] = useState(false);
+  const [tokens, setTokens] = useState<DualTokens>({
+    player: { claim: 2, seize: 2 },
+    bot: { claim: 2, seize: 2 },
+  });
+  const [mode, setMode] = useState<ClickMode>("build");
+  const [treatyResult, setTreatyResult] = useState<TreatyResult>(null);
+  const [stats, setStats] = useState<DualStats>({
+    player: { claimsUsed: 0, seizesUsed: 0, treatiesAccepted: 0, treatiesProposed: 0, treatiesRejected: 0, pathsBuilt: 0 },
+    bot: { claimsUsed: 0, seizesUsed: 0, treatiesAccepted: 0, treatiesProposed: 0, treatiesRejected: 0, pathsBuilt: 0 },
+  });
   const clearRef = useRef<() => void>(() => {});
   const undoRef = useRef<() => void>(() => {});
+  const setModeRef = useRef<(m: ClickMode) => void>(() => {});
   const gameStartRef = useRef<number>(Date.now());
   const scoreSavedRef = useRef(false);
 
   const config: GameConfig = useMemo(() => ({ ...DEFAULT_CONFIG }), []);
 
-  const saveScore = useCallback(async (finalScore: number) => {
+  const saveScore = useCallback(async (finalScore: DualScore) => {
     if (scoreSavedRef.current) return;
     scoreSavedRef.current = true;
     const durationSeconds = Math.floor((Date.now() - gameStartRef.current) / 1000);
     try {
       await apiPost("/api/game/sessions", {
-        score: finalScore,
+        score: finalScore.player,
         durationSeconds,
         config,
       });
@@ -53,7 +64,7 @@ export function App() {
         pending={pending}
         onClear={() => {
           clearRef.current();
-          setScore(0);
+          setScore({ player: 0, bot: 0 });
           setGameOver(false);
           gameStartRef.current = Date.now();
           scoreSavedRef.current = false;
@@ -61,6 +72,10 @@ export function App() {
         onUndo={() => undoRef.current()}
         score={score}
         gameOver={gameOver}
+        tokens={tokens}
+        mode={mode}
+        onSetMode={(m) => setModeRef.current(m)}
+        treatyResult={treatyResult}
         username={user.username}
         onLogout={logout}
         onLeaderboard={() => setShowLeaderboard(true)}
@@ -87,21 +102,39 @@ export function App() {
           <directionalLight position={[-10, 12, -6]} intensity={0.25} color="#6a8abd" />
           <GameGrid
             config={config}
-            onStateChange={(count, isPending, clearFn, undoFn, newScore, isGameOver) => {
-              setPathCount(count);
-              setPending(isPending);
-              clearRef.current = clearFn;
-              undoRef.current = undoFn;
-              setScore(newScore);
-              if (isGameOver && !gameOver) {
-                saveScore(newScore);
+            onStateChange={(state, handlers) => {
+              setPathCount(state.pathCount);
+              setPending(state.pending);
+              clearRef.current = handlers.clear;
+              undoRef.current = handlers.undo;
+              setModeRef.current = handlers.setMode;
+              setScore(state.score);
+              setTokens(state.tokens);
+              setMode(state.mode);
+              setTreatyResult(state.treatyResult);
+              setStats(state.stats);
+              if (state.gameOver && !gameOver) {
+                saveScore(state.score);
               }
-              setGameOver(isGameOver);
+              setGameOver(state.gameOver);
             }}
           />
         </Canvas>
       </div>
       {showLeaderboard && <Leaderboard onClose={() => setShowLeaderboard(false)} />}
+      {gameOver && (
+        <EndGameModal
+          score={score}
+          stats={stats}
+          onRestart={() => {
+            clearRef.current();
+            setScore({ player: 0, bot: 0 });
+            setGameOver(false);
+            gameStartRef.current = Date.now();
+            scoreSavedRef.current = false;
+          }}
+        />
+      )}
     </div>
   );
 }
